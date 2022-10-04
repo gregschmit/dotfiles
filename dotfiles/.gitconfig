@@ -1,0 +1,10 @@
+[user]
+	email = schmitgreg@gmail.com
+	name = Gregory N. Schmit
+	signingkey = 9223FD7996D10E80263EA32BFE10BE3BD89CD73D
+[commit]
+	gpgsign = true
+[gpg]
+	program = gpg
+[pull]
+	ff = only
