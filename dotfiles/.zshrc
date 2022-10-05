@@ -25,8 +25,8 @@ prompt_git_info() {
 }
 
 precmd() {
-    # Configure prompt.
-    PROMPT="%F{red}%n%f:%F{blue}%.%f$(prompt_git_info) %% "
+  # Configure prompt.
+  PROMPT="%F{red}%n%f:%F{blue}%.%f$(prompt_git_info) %% "
 }
 
 # Configure right-side smiley/frown status prompt.
