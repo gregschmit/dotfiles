@@ -3,7 +3,9 @@
 This is my personal collection of dotfiles.
 
 Currently the only thing that is specific to me personally is the `.gitconfig`, which obviously has
-my name, email, and GPG signing key ID. Feel free to fork this repo and use for your own dotfiles.
+my name, email, and GPG signing key ID.
+
+Feel free to fork this repo and use for your own dotfiles.
 
 ## Installation
 
