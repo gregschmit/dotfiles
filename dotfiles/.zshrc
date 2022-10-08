@@ -1,7 +1,7 @@
 # Load and initialize modules.
 autoload -Uz compinit && compinit -u  # Unsecure Ok for single-user systems.
 
-# Allow substitution in the prompt.
+# Set options.
 setopt PROMPT_SUBST
 
 # Helper to return formatted git info for `PROMPT`.
@@ -26,11 +26,11 @@ prompt_git_info() {
 
 precmd() {
   # Configure prompt.
-  PROMPT="%F{red}%n%f:%F{blue}%.%f$(prompt_git_info) %% "
+  PROMPT="%F{red}%n%f:%F{blue}%.%f$(prompt_git_info) %F{green}%%%f "
 }
 
 # Configure right-side smiley/frown status prompt.
-RPROMPT='%(?,%F{green}:%),%F{red}%? :()%f'
+RPROMPT='%(?,%F{green}:),%F{red}%? :()%f'
 
 # Use `vi`.
 export EDITOR=vim
