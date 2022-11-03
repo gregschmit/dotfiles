@@ -24,9 +24,16 @@ prompt_git_info() {
   printf " $branch$dirty"
 }
 
+# Helper to determine if we are in a Python virtual environment.
+env_info() {
+  if [ "$VIRTUAL_ENV" ]; then
+    echo "(env) "
+  fi
+}
+
 precmd() {
   # Configure prompt.
-  PROMPT="%F{red}%n%f:%F{blue}%.%f$(prompt_git_info) %(?,%F{green},%F{red})%%%f "
+  PROMPT="$(env_info)%F{red}%n%f:%F{blue}%.%f$(prompt_git_info) %(?,%F{green},%F{red})%%%f "
 }
 
 # Configure right-side smiley/frown status prompt.
