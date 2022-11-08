@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 
-# Replace this user's home directory dotfiles with symlinks to the dotfiles directory.
+# Replace this user's home directory files with symlinks to the `src` directory.
 
 from argparse import ArgumentParser
 import os
+import shutil
 
 if __name__ == "__main__":
     # Parse arguments.
     parser = ArgumentParser(
-        description="Install (symlink) dotfiles into the current user's home directory."
+        description="Install (symlink) files into the current user's home directory."
     )
     parser.add_argument(
         "-f",
@@ -21,19 +22,19 @@ if __name__ == "__main__":
 
     # Setup directory variables.
     project_dir = os.path.dirname(os.path.abspath(__file__))
-    dotfiles_dir = os.path.join(project_dir, "dotfiles")
+    src_dir = os.path.join(project_dir, "src")
     home_dir = os.path.expanduser("~")
-    dotfiles = os.listdir(dotfiles_dir)
-    pad = max([len(f) for f in dotfiles]) + 1
+    src_files = os.listdir(src_dir)
+    pad = max([len(f) for f in src_files]) + 1
 
-    # Iterate over dotfiles and symlink them.
-    for f in os.listdir(dotfiles_dir):
-        homefile = os.path.join(home_dir, f)
-        dotfile = f"{dotfiles_dir}/{f}"
+    # Iterate over `src` files and symlink them.
+    for f in src_files:
+        home_file = os.path.join(home_dir, f)
+        src_file = f"{src_dir}/{f}"
 
         # Check if symlink already exists.
         try:
-            if os.path.realpath(homefile) == dotfile:
+            if os.path.realpath(home_file) == src_file:
                 print(f"{f:{pad}}: already symlinked")
                 continue
         except:
@@ -41,12 +42,15 @@ if __name__ == "__main__":
 
         # Attempt to symlink the file.
         try:
-            # If `homefile` exists and `args.force` is specified, then remove the `homefile`.
-            if args.force and os.path.isfile(homefile):
-                os.remove(homefile)
+            # If `home_file` exists and `args.force` is specified, then remove the `home_file`.
+            if args.force:
+                if os.path.islink(home_file) or os.path.isfile(home_file):
+                    os.remove(home_file)
+                elif os.path.isdir(home_file):
+                    shutil.rmtree(home_file)
 
             # Symlink the file.
-            os.symlink(dotfile, homefile)
+            os.symlink(src_file, home_file)
             print(f"{f:{pad}}: successfully symlinked")
         except Exception as e:
             print(f"{f:{pad}}: failed to symlink ({e})")
