@@ -1,0 +1,20 @@
+# https://editorconfig.org
+
+root = true
+
+# Defaults
+[*]
+end_of_line = lf
+max_line_length = 100
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+# Config Scripts
+[src/.*]
+indent_style = space
+indent_size = 2
+
+# Shell Scripts
+[*.sh]
+indent_style = space
+indent_size = 2

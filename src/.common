@@ -1,0 +1,86 @@
+# This file contains shell configuration common to both `bash` and `zsh`. This file should be
+# sourced by both interactive and non-interactive shells and should be idempotent.
+
+# Check if `input_path` doesn't exist in `PATH`.
+path_missing() {
+  input_path="$1"
+  if test "${PATH#*$input_path}" = "$PATH"
+  then
+    return 0  # `PATH` is missing `input_path`.
+  else
+    return 1  # `PATH` is NOT missing `input_path`.
+  fi
+}
+
+# Append to `PATH` unless it's already there.
+path_append() {
+  input_path="$1"
+  if path_missing "$input_path"; then
+    PATH="$PATH:$input_path"
+  fi
+}
+
+# Prepend to `PATH` unless it's already there.
+path_prepend() {
+  input_path="$1"
+  if path_missing $input_path; then
+    PATH="$input_path:$PATH"
+  fi
+}
+
+# Source a path if it exists.
+source_if_exists() {
+  [ -f "$1" ] && . "$1"
+}
+
+# Docker Helpers
+alias dockervm='screen ~/Library/Containers/com.docker.docker/Data/vms/0/tty'
+alias dockerclean='docker rm `docker ps -aq`; docker volume rm `docker volume ls -q`; docker imagerm `docker image ls -aq`;'
+
+# Helper to collapse rails routes after a grep.
+alias collapse_routes="sed -E 's/^[[:space:]]+([A-Z])/  _  \1/g' | sed -E 's/^(.)/  \1/g' | align"
+
+# Helper to show license for all gems.
+alias gem_licenses='for i in `gem list | cut -d" " -f1`; do printf "%38s `gem spec $i license`\n" $i; done'
+
+# Use `vim` as primary editor.
+export EDITOR=vim
+
+# Compiler overrides for mysql/openssl. Disabled for now.
+# export LDFLAGS="-L/usr/local/opt/mysql@5.7/lib -L/usr/local/opt/mysql-client@5.7/lib"
+# export CPPFLAGS="-I/usr/local/opt/mysql@5.7/include -I/usr/local/opt/mysql-client@5.7/include"
+# export LDFLAGS="-L/usr/local/opt/openssl@1.1/lib"
+# export CPPFLAGS="-I/usr/local/opt/openssl@1.1/include"
+
+# Python Environments
+path_prepend "$HOME/.pyenv"
+eval "$(/usr/local/bin/pyenv init -)"
+activate() {
+  for f in ./venv ./.venv ./env ./.env; do
+    if [ -d $f ]; then
+      . "$f/bin/activate"
+      break
+    fi
+  done
+}
+
+# Perlbrew
+source_if_exists ~/perl5/perlbrew/etc/bashrc
+
+# Node/NPM
+export NODE_PATH=/usr/local/lib/node_modules
+
+# Postgres (Homebrew)
+path_append "/usr/local/opt/postgresql\@14/lib/postgresql\@14/"
+
+# RVM
+path_append "$HOME/.rvm/bin"
+source_if_exists "$HOME/.rvm/scripts/rvm"
+
+# Java
+path_prepend "/usr/local/opt/openjdk/bin"
+
+# Rust
+source_if_exists "$HOME/.cargo/env"
+
+export PATH
