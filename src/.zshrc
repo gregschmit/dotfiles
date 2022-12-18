@@ -1,5 +1,5 @@
 # Load and initialize modules.
-autoload -Uz compinit && compinit -u  # Unsecure Ok for single-user systems.
+autoload -Uz compinit && compinit -u  # Unsecure ok for single-user systems.
 
 # Set options.
 setopt PROMPT_SUBST
@@ -43,6 +43,4 @@ RPROMPT='%(?,%F{green}:),%F{red}%? :()%f'
 bindkey -v
 bindkey "^?" backward-delete-char  # Fix backspace bug.
 
-# Google Cloud SDK
-source_if_exists "$HOME/google-cloud-sdk/path.zsh.inc"
-source_if_exists "$HOME/google-cloud-sdk/completion.zsh.inc"
+. ~/.commonrc_interactive

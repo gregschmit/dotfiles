@@ -1,7 +1,7 @@
 # in .bash_profile, source this file, like this:
 #   [ -f ~/.bashrc ] && . ~/.bashrc
 
-. ~/.common
+. ~/.commonrc
 
 # Use `vi` mode.
 set -o vi
@@ -58,6 +58,4 @@ if [[ $- == *i* ]]; then
   bind '"\e[B": history-search-forward'
 fi
 
-# Google Cloud SDK
-source_if_exists "$HOME/google-cloud-sdk/path.bash.inc"
-source_if_exists "$HOME/google-cloud-sdk/completion.bash.inc"
+. ~/.commonrc_interactive

@@ -1,5 +1,5 @@
-# This file contains shell configuration common to both `bash` and `zsh`. This file should be
-# sourced by both interactive and non-interactive shells and should be idempotent.
+# This file contains shell configuration common to both `bash` and `zsh`. This file MUST be sourced
+# by both interactive and non-interactive shells and SHOULD be idempotent.
 
 # Check if `input_path` doesn't exist in `PATH`.
 path_missing() {
@@ -52,7 +52,7 @@ export EDITOR=vim
 # export LDFLAGS="-L/usr/local/opt/openssl@1.1/lib"
 # export CPPFLAGS="-I/usr/local/opt/openssl@1.1/include"
 
-# Python Environments
+# Python Virtual Environments
 path_prepend "$HOME/.pyenv"
 eval "$(/usr/local/bin/pyenv init -)"
 activate() {
@@ -72,10 +72,6 @@ export NODE_PATH=/usr/local/lib/node_modules
 
 # Postgres (Homebrew)
 path_append "/usr/local/opt/postgresql\@14/lib/postgresql\@14/"
-
-# RVM
-path_append "$HOME/.rvm/bin"
-source_if_exists "$HOME/.rvm/scripts/rvm"
 
 # Java
 path_prepend "/usr/local/opt/openjdk/bin"

@@ -12,5 +12,13 @@ Feel free to fork this repo and use for your own dotfiles.
 
 - If you're not me, you should fork this repo first to make your own personal adjustments.
 - Clone the repo somewhere. I always have a `~/git` directory, so I end up cloning to
-  `~/git/dotfiles`.
+  `~/git/dotfiles`. You can also track upstream to keep things up to date:
+
+```sh
+git clone git@github.com/<username>/dotfiles
+cd dotfiles
+git remote add upstream https://github.com/gregschmit/dotfiles
+git fetch upstream
+```
+
 - Run `./install.sh` to install dotfiles (will clobber existing files/directories).

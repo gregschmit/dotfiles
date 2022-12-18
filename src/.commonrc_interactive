@@ -1,0 +1,15 @@
+# This file contains shell configuration common to both `bash` and `zsh`. This file MUST be sourced
+# ONLY by interactive shells and SHOULD be idempotent.
+
+# Google Cloud SDK
+if [ -n "$ZSH_NAME" ]; then
+  source_if_exists "$HOME/google-cloud-sdk/path.zsh.inc"
+  source_if_exists "$HOME/google-cloud-sdk/completion.zsh.inc"
+elif [ -n "$BASH" ]; then
+  source_if_exists "$HOME/google-cloud-sdk/path.bash.inc"
+  source_if_exists "$HOME/google-cloud-sdk/completion.bash.inc"
+fi
+
+# RVM (Must be last to avoid warnings.)
+path_append "$HOME/.rvm/bin"
+source_if_exists "$HOME/.rvm/scripts/rvm"
