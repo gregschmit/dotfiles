@@ -1,8 +1,6 @@
 # in .bash_profile, source this file, like this:
 #   [ -f ~/.bashrc ] && . ~/.bashrc
 
-. ~/.commonrc
-
 # Use `vi` mode.
 set -o vi
 
@@ -58,4 +56,4 @@ if [[ $- == *i* ]]; then
   bind '"\e[B": history-search-forward'
 fi
 
-. ~/.commonrc_interactive
+. ~/.commonrc

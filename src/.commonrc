@@ -1,5 +1,9 @@
 # This file contains shell configuration common to both `bash` and `zsh`. This file MUST be sourced
-# by both interactive and non-interactive shells and SHOULD be idempotent.
+# by interactive shells and SHOULD be idempotent.
+
+################################
+# Path/Source Helper Functions #
+################################
 
 # Check if `input_path` doesn't exist in `PATH`.
 path_missing() {
@@ -33,6 +37,10 @@ source_if_exists() {
   [ -f "$1" ] && . "$1"
 }
 
+###########
+# Aliases #
+###########
+
 # Docker Helpers
 alias dockervm='screen ~/Library/Containers/com.docker.docker/Data/vms/0/tty'
 alias dockerclean='docker rm `docker ps -aq`; docker volume rm `docker volume ls -q`; docker imagerm `docker image ls -aq`;'
@@ -43,14 +51,21 @@ alias collapse_routes="sed -E 's/^[[:space:]]+([A-Z])/  _  \1/g' | sed -E 's/^(.
 # Helper to show license for all gems.
 alias gem_licenses='for i in `gem list | cut -d" " -f1`; do printf "%38s `gem spec $i license`\n" $i; done'
 
+#################
+# Configuration #
+#################
+
 # Use `vim` as primary editor.
 export EDITOR=vim
 
-# Compiler overrides for mysql/openssl. Disabled for now.
-# export LDFLAGS="-L/usr/local/opt/mysql@5.7/lib -L/usr/local/opt/mysql-client@5.7/lib"
-# export CPPFLAGS="-I/usr/local/opt/mysql@5.7/include -I/usr/local/opt/mysql-client@5.7/include"
-# export LDFLAGS="-L/usr/local/opt/openssl@1.1/lib"
-# export CPPFLAGS="-I/usr/local/opt/openssl@1.1/include"
+# Google Cloud SDK
+if [ -n "$ZSH_NAME" ]; then
+  source_if_exists "$HOME/google-cloud-sdk/path.zsh.inc"
+  source_if_exists "$HOME/google-cloud-sdk/completion.zsh.inc"
+elif [ -n "$BASH" ]; then
+  source_if_exists "$HOME/google-cloud-sdk/path.bash.inc"
+  source_if_exists "$HOME/google-cloud-sdk/completion.bash.inc"
+fi
 
 # Python Virtual Environments
 path_prepend "$HOME/.pyenv"
@@ -64,6 +79,15 @@ activate() {
   done
 }
 
+# Compiler overrides for mysql/openssl. Disabled for now.
+# export LDFLAGS="-L/usr/local/opt/mysql@5.7/lib -L/usr/local/opt/mysql-client@5.7/lib"
+# export CPPFLAGS="-I/usr/local/opt/mysql@5.7/include -I/usr/local/opt/mysql-client@5.7/include"
+# export LDFLAGS="-L/usr/local/opt/openssl@1.1/lib"
+# export CPPFLAGS="-I/usr/local/opt/openssl@1.1/include"
+
+# Perlbrew
+source_if_exists ~/perl5/perlbrew/etc/bashrc
+
 # Node/NPM
 export NODE_PATH=/usr/local/lib/node_modules
 
@@ -75,5 +99,9 @@ path_prepend "/usr/local/opt/openjdk/bin"
 
 # Rust
 source_if_exists "$HOME/.cargo/env"
+
+# RVM (Must be last to avoid warnings.)
+path_append "$HOME/.rvm/bin"
+source_if_exists "$HOME/.rvm/scripts/rvm"
 
 export PATH

@@ -43,4 +43,4 @@ RPROMPT='%(?,%F{green}:),%F{red}%? :()%f'
 bindkey -v
 bindkey "^?" backward-delete-char  # Fix backspace bug.
 
-. ~/.commonrc_interactive
+. ~/.commonrc
