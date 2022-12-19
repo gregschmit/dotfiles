@@ -10,6 +10,9 @@ elif [ -n "$BASH" ]; then
   source_if_exists "$HOME/google-cloud-sdk/completion.bash.inc"
 fi
 
+# Perlbrew
+source_if_exists ~/perl5/perlbrew/etc/bashrc
+
 # RVM (Must be last to avoid warnings.)
 path_append "$HOME/.rvm/bin"
 source_if_exists "$HOME/.rvm/scripts/rvm"
