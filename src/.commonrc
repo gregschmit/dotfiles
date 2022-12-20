@@ -68,16 +68,18 @@ elif [ -n "$BASH" ]; then
 fi
 
 # Python Virtual Environments
-path_prepend "$HOME/.pyenv"
-eval "$(/usr/local/bin/pyenv init -)"
-activate() {
-  for f in ./venv ./.venv ./env ./.env; do
-    if [ -d $f ]; then
-      . "$f/bin/activate"
-      break
-    fi
-  done
-}
+if [ -f "/usr/local/bin/pyenv" ] && [ -e "$HOME/.pyenv" ]; then
+  path_prepend "$HOME/.pyenv"
+  eval "$(/usr/local/bin/pyenv init -)"
+  activate() {
+    for f in ./venv ./.venv ./env ./.env; do
+      if [ -d $f ]; then
+        . "$f/bin/activate"
+        break
+      fi
+    done
+  }
+fi
 
 # Compiler overrides for mysql/openssl. Disabled for now.
 # export LDFLAGS="-L/usr/local/opt/mysql@5.7/lib -L/usr/local/opt/mysql-client@5.7/lib"
