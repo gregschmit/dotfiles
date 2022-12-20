@@ -1,9 +1,9 @@
 # This file contains shell configuration common to both `bash` and `zsh`. This file MUST be sourced
 # by interactive shells and SHOULD be idempotent.
 
-################################
-# Path/Source Helper Functions #
-################################
+#######################
+# Path/Source Helpers #
+#######################
 
 # Check if `input_path` doesn't exist in `PATH`.
 path_missing() {
@@ -51,9 +51,9 @@ alias collapse_routes="sed -E 's/^[[:space:]]+([A-Z])/  _  \1/g' | sed -E 's/^(.
 # Helper to show license for all gems.
 alias gem_licenses='for i in `gem list | cut -d" " -f1`; do printf "%38s `gem spec $i license`\n" $i; done'
 
-#################
-# Configuration #
-#################
+#############################
+# Application Configuration #
+#############################
 
 # Use `vim` as primary editor.
 export EDITOR=vim
