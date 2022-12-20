@@ -51,9 +51,9 @@ alias collapse_routes="sed -E 's/^[[:space:]]+([A-Z])/  _  \1/g' | sed -E 's/^(.
 # Helper to show license for all gems.
 alias gem_licenses='for i in `gem list | cut -d" " -f1`; do printf "%38s `gem spec $i license`\n" $i; done'
 
-#############################
-# Application Configuration #
-#############################
+################
+# Applications #
+################
 
 # Use `vim` as primary editor.
 export EDITOR=vim
