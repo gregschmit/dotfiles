@@ -1,4 +1,4 @@
-# Greg's Home Directory Dotfiles
+# My Home Directory Dotfiles
 
 This is my personal collection of dotfiles (and some miscellaneous files).
 
