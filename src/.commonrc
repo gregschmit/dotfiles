@@ -90,8 +90,10 @@ fi
 # Perlbrew
 source_if_exists ~/perl5/perlbrew/etc/bashrc
 
-# Node/NPM
+# Node/NPM/NVS
 export NODE_PATH=/usr/local/lib/node_modules
+export NVS_HOME="$HOME/.nvs"
+source_if_exists "$NVS_HOME/nvs.sh"
 
 # Postgres (Homebrew)
 path_append "/usr/local/opt/postgresql\@14/lib/postgresql\@14/"
