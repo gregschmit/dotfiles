@@ -32,9 +32,14 @@ path_prepend() {
   fi
 }
 
-# Source a path if it exists.
+# Source a file if it exists.
 source_if_exists() {
   [ -f "$1" ] && . "$1"
+}
+
+# Eval a command if a path exists.
+eval_if_exists() {
+  [ -e "$1" ] && eval "$2"
 }
 
 ###########
@@ -90,10 +95,8 @@ fi
 # Perlbrew
 source_if_exists ~/perl5/perlbrew/etc/bashrc
 
-# Node/NPM/NVS
-export NODE_PATH=/usr/local/lib/node_modules
-export NVS_HOME="$HOME/.nvs"
-source_if_exists "$NVS_HOME/nvs.sh"
+# Nodenv
+eval_if_exists "$HOME/.nodenv" "$(nodenv init -)"
 
 # Postgres (Homebrew)
 path_append "/usr/local/opt/postgresql\@14/lib/postgresql\@14/"
