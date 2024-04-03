@@ -92,14 +92,14 @@ fi
 # export LDFLAGS="-L/usr/local/opt/openssl@1.1/lib"
 # export CPPFLAGS="-I/usr/local/opt/openssl@1.1/include"
 
+# For certain Homebrew software.
+path_append /usr/local/sbin
+
 # Perlbrew
 source_if_exists ~/perl5/perlbrew/etc/bashrc
 
 # Nodenv
 eval_if_exists "$HOME/.nodenv" "$(nodenv init -)"
-
-# Postgres (Homebrew)
-path_append "/usr/local/opt/postgresql\@14/lib/postgresql\@14/"
 
 # Java
 path_prepend "/usr/local/opt/openjdk/bin"
