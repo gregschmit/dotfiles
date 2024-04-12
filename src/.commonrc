@@ -93,7 +93,7 @@ eval_if_exists "/opt/homebrew/bin/brew" "$(/opt/homebrew/bin/brew shellenv)"
 source_if_exists ~/perl5/perlbrew/etc/bashrc
 
 # Nodenv
-eval_if_exists "$HOME/.nodenv" '$(nodenv init -)'
+eval "$(nodenv init -)"
 
 # Java
 path_prepend "/usr/local/opt/openjdk/bin"
