@@ -8,31 +8,24 @@ export EDITOR=vim
 # Path/Source Helpers #
 #######################
 
-# Check if `input_path` doesn't exist in `PATH`.
-path_missing() {
-  input_path="$1"
-  if test "${PATH#*$input_path}" = "$PATH"
-  then
-    return 0  # `PATH` is missing `input_path`.
-  else
-    return 1  # `PATH` is NOT missing `input_path`.
-  fi
+# Remove a path from `PATH`.
+path_remove() {
+  PATH=":$PATH:"
+  PATH="${PATH//:$1:/:}"
+  PATH="${PATH#:}"
+  PATH="${PATH%:}"
 }
 
-# Append to `PATH` unless it's already there.
+# Append to `PATH`, moving it to the end if it already exists.
 path_append() {
-  input_path="$1"
-  if path_missing "$input_path"; then
-    PATH="$PATH:$input_path"
-  fi
+  path_remove "$1"
+  PATH="$PATH:$1"
 }
 
 # Prepend to `PATH` unless it's already there.
 path_prepend() {
-  input_path="$1"
-  if path_missing $input_path; then
-    PATH="$input_path:$PATH"
-  fi
+  path_remove "$1"
+  PATH="$1:$PATH"
 }
 
 # Source a file if it exists.
@@ -96,7 +89,7 @@ source_if_exists ~/perl5/perlbrew/etc/bashrc
 eval "$(nodenv init -)"
 
 # Java
-path_prepend "/usr/local/opt/openjdk/bin"
+path_prepend "/opt/homebrew/opt/openjdk/bin"
 
 # Rust
 source_if_exists "$HOME/.cargo/env"
