@@ -1,6 +1,9 @@
 # This file contains shell configuration common to both `bash` and `zsh`. This file MUST be sourced
 # by interactive shells and SHOULD be idempotent.
 
+export PATH
+export EDITOR=vim
+
 #######################
 # Path/Source Helpers #
 #######################
@@ -60,9 +63,6 @@ alias gem_licenses='for i in `gem list | cut -d" " -f1`; do printf "%38s `gem sp
 # Applications #
 ################
 
-# Use `vim` as primary editor.
-export EDITOR=vim
-
 # Google Cloud SDK
 if [ -n "$ZSH_NAME" ]; then
   source_if_exists "$HOME/google-cloud-sdk/path.zsh.inc"
@@ -86,20 +86,14 @@ if [ -f "/usr/local/bin/pyenv" ] && [ -e "$HOME/.pyenv" ]; then
   }
 fi
 
-# Compiler overrides for mysql/openssl. Disabled for now.
-# export LDFLAGS="-L/usr/local/opt/mysql@5.7/lib -L/usr/local/opt/mysql-client@5.7/lib"
-# export CPPFLAGS="-I/usr/local/opt/mysql@5.7/include -I/usr/local/opt/mysql-client@5.7/include"
-# export LDFLAGS="-L/usr/local/opt/openssl@1.1/lib"
-# export CPPFLAGS="-I/usr/local/opt/openssl@1.1/include"
-
-# For certain Homebrew software.
-path_append /usr/local/sbin
+# Homebrew
+eval_if_exists "/opt/homebrew/bin/brew" "$(/opt/homebrew/bin/brew shellenv)"
 
 # Perlbrew
 source_if_exists ~/perl5/perlbrew/etc/bashrc
 
 # Nodenv
-eval_if_exists "$HOME/.nodenv" "$(nodenv init -)"
+eval_if_exists "$HOME/.nodenv" '$(nodenv init -)'
 
 # Java
 path_prepend "/usr/local/opt/openjdk/bin"
@@ -110,5 +104,3 @@ source_if_exists "$HOME/.cargo/env"
 # RVM (Must be last to avoid warnings.)
 path_append "$HOME/.rvm/bin"
 source_if_exists "$HOME/.rvm/scripts/rvm"
-
-export PATH
