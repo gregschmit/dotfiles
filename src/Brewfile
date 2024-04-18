@@ -2,7 +2,7 @@ tap "homebrew/bundle"
 
 # Core Tools
 brew "git"
-cask "alacritty"
+cask "alacritty"  # Mostly for OSC 52.
 brew "tmux"
 brew "vim"
 brew "neovim"
