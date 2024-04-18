@@ -1,0 +1,28 @@
+tap "homebrew/bundle"
+
+# Core Tools
+brew "git"
+cask "alacritty"
+brew "tmux"
+brew "vim"
+brew "neovim"
+
+# Misc
+brew "align"
+brew "sqlite"
+
+# Language Tools
+brew "nodenv"
+brew "yarn"
+
+# College
+brew "openjdk"
+
+# Ruby Projects
+brew "libpq", link: true
+brew "mysql-client@5.7"
+brew "openssl@1.1", link: true
+brew "postgresql@16"
+brew "redis"
+cask "wkhtmltopdf"
+brew "zlib"
