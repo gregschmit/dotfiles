@@ -13,6 +13,7 @@ brew "sqlite"
 
 # Language Tools
 brew "nodenv"
+brew "pyenv"
 brew "yarn"
 
 # College
