@@ -33,11 +33,6 @@ source_if_exists() {
   [ -f "$1" ] && . "$1"
 }
 
-# Eval a command if a path exists.
-eval_if_exists() {
-  [ -e "$1" ] && eval "$2"
-}
-
 ###########
 # Aliases #
 ###########
@@ -65,25 +60,15 @@ elif [ -n "$BASH" ]; then
   source_if_exists "$HOME/google-cloud-sdk/completion.bash.inc"
 fi
 
-# Python Virtual Environments
-if [ -f "/usr/local/bin/pyenv" ] && [ -e "$HOME/.pyenv" ]; then
-  path_prepend "$HOME/.pyenv"
-  eval "$(/usr/local/bin/pyenv init -)"
-  activate() {
-    for f in ./venv ./.venv ./env ./.env; do
-      if [ -d $f ]; then
-        . "$f/bin/activate"
-        break
-      fi
-    done
-  }
-fi
-
 # Homebrew
-eval_if_exists "/opt/homebrew/bin/brew" "$(/opt/homebrew/bin/brew shellenv)"
+eval "$(/opt/homebrew/bin/brew shellenv)"
+
+# Python
+path_prepend "$HOME/.pyenv"
+eval "$(pyenv init -)"
 
 # Perlbrew
-source_if_exists ~/perl5/perlbrew/etc/bashrc
+. ~/perl5/perlbrew/etc/bashrc
 
 # Nodenv
 eval "$(nodenv init -)"
@@ -92,8 +77,8 @@ eval "$(nodenv init -)"
 path_prepend "/opt/homebrew/opt/openjdk/bin"
 
 # Rust
-source_if_exists "$HOME/.cargo/env"
+. "$HOME/.cargo/env"
 
 # RVM (Must be last to avoid warnings.)
 path_append "$HOME/.rvm/bin"
-source_if_exists "$HOME/.rvm/scripts/rvm"
+. "$HOME/.rvm/scripts/rvm"
