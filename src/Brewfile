@@ -6,6 +6,7 @@ cask "alacritty"  # Mostly for OSC 52.
 brew "tmux"
 brew "vim"
 brew "neovim"
+brew "ollama"
 
 # Misc
 brew "align"
