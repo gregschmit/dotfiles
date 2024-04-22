@@ -21,7 +21,9 @@ brew "yarn"
 brew "openjdk"
 
 # Ruby Projects
+brew "freetds"
 brew "libpq", link: true
+brew "mosquitto"
 brew "mysql-client@5.7"
 brew "openssl@1.1", link: true
 brew "postgresql@16"
