@@ -66,6 +66,14 @@ eval "$(/opt/homebrew/bin/brew shellenv)"
 # Python
 path_prepend "$HOME/.pyenv"
 eval "$(pyenv init -)"
+activate() {
+  for f in ./venv ./.venv; do
+    if [ -d $f ]; then
+      . "$f/bin/activate"
+      break
+    fi
+  done
+}
 
 # Perlbrew
 . ~/perl5/perlbrew/etc/bashrc
