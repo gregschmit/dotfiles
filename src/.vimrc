@@ -1,6 +1,6 @@
 runtime defaults.vim
 
-set colorcolumn=80
+set colorcolumn=80,100
 set number
 set relativenumber
 set showcmd
