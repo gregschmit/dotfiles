@@ -4,7 +4,7 @@ autoload -Uz compinit && compinit -u  # Unsecure ok for single-user systems.
 # Set options.
 setopt PROMPT_SUBST
 
-# Return formatted git info for `PROMPT`.
+# Return formatted git info for `PS1`.
 prompt_git_info() {
   # Setup branch display.
   branch=`git rev-parse --abbrev-ref HEAD 2> /dev/null`
@@ -24,17 +24,7 @@ prompt_git_info() {
   printf " $branch$dirty"
 }
 
-# Determine if we are in a Python virtual environment.
-env_info() {
-  if [ "$VIRTUAL_ENV" ]; then
-    echo "(env) "
-  fi
-}
-
-precmd() {
-  # Configure prompt.
-  PROMPT="$(env_info)%F{red}%n%f:%F{blue}%.%f$(prompt_git_info) %(?,%F{green},%F{red})%%%f "
-}
+PS1="%F{red}%n%f:%F{blue}%.%f\$(prompt_git_info) %(?,%F{green},%F{red})%%%f "
 
 # Configure right-side smiley/frown status prompt.
 RPROMPT='%(?,%F{green}:),%F{red}%? :()%f'
