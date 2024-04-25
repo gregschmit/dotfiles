@@ -22,7 +22,7 @@ path_append() {
   PATH="$PATH:$1"
 }
 
-# Prepend to `PATH` unless it's already there.
+# Prepend to `PATH`, moving it to the front if it already exists.
 path_prepend() {
   path_remove "$1"
   PATH="$1:$PATH"
