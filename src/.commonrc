@@ -33,6 +33,13 @@ source_if_exists() {
   [ -f "$1" ] && . "$1"
 }
 
+# Eval a command, with arbitrary args, if it exists.
+eval_if_exists() {
+  if command -v $1 >/dev/null; then
+    eval "$($@)"
+  fi
+}
+
 ###########
 # Aliases #
 ###########
@@ -61,24 +68,21 @@ elif [ -n "$BASH" ]; then
 fi
 
 # Homebrew
-if [ -f "/home/linuxbrew/.linuxbrew/bin/brew" ]; then
-  eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-elif [ -f "/opt/homebrew/bin/brew" ]; then
-  eval "$(/opt/homebrew/bin/brew shellenv)"
-fi
+eval_if_exists /home/linuxbrew/.linuxbrew/bin/brew shellenv
+eval_if_exists /opt/homebrew/bin/brew shellenv
 
 # Java
-path_prepend "/opt/homebrew/opt/openjdk/bin"
+path_prepend /opt/homebrew/opt/openjdk/bin
 
 # Nodenv
-eval "$(nodenv init -)"
+eval_if_exists nodenv init -
 
 # Perlbrew
-. ~/perl5/perlbrew/etc/bashrc
+source_if_exists ~/perl5/perlbrew/etc/bashrc
 
 # Python
 path_prepend "$HOME/.pyenv"
-eval "$(pyenv init -)"
+eval_if_exists pyenv init -
 activate() {
   for f in ./venv ./.venv; do
     if [ -d $f ]; then
@@ -89,8 +93,8 @@ activate() {
 }
 
 # Rust
-. "$HOME/.cargo/env"
+source_if_exists "$HOME/.cargo/env"
 
 # RVM (Must be last to avoid warnings.)
 path_append "$HOME/.rvm/bin"
-. "$HOME/.rvm/scripts/rvm"
+source_if_exists "$HOME/.rvm/scripts/rvm"
