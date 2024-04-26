@@ -13,22 +13,21 @@ if [ -d ~/.bash_plugins ]; then
 fi
 
 # Bash colors (need to wrap with 001 and 002 for PS1 length calculation).
-BASHNOCOLOR='\001\033[0m\002'
-BASHRED='\001\033[0;31m\002'
-BASHGREEN='\001\033[0;32m\002'
-BASHBRIGHTGREEN='\001\033[1;32m\002'
-BASHBLUE='\001\033[1;34m\002'
-BASHPURPLE='\001\033[0;35m\002'
-BASHCYAN='\001\033[0;36m\002'
-BASHYELLOW='\001\033[1;33m\002'
+NOCOLOR='\001\033[0m\002'
+RED='\001\033[0;31m\002'
+GREEN='\001\033[0;32m\002'
+YELLOW='\001\033[0;33m\002'
+BLUE='\001\033[0;34m\002'
+MAGENTA='\001\033[0;35m\002'
+CYAN='\001\033[0;36m\002'
 
 # Bash prompt.
 ps_status_smiley() {
   status=$?
   if [ "$status" -eq 0 ]; then
-    printf " $BASHGREEN:)$BASHNOCOLOR"
+    printf " $GREEN:)$NOCOLOR"
   else
-    printf " $BASHRED:( $status$BASHNOCOLOR"
+    printf " $RED:( $status$NOCOLOR"
   fi
 }
 ps_git_branch() {
@@ -36,19 +35,19 @@ ps_git_branch() {
   if [ -z $branch ]; then
     return
   elif [ "$branch" = "HEAD" ]; then
-    branch="$BASHRED[detached]$BASHNOCOLOR"
+    branch="$RED[detached]$NOCOLOR"
   else
-    branch="$BASHCYAN[$branch]$BASHNOCOLOR"
+    branch="$CYAN[$branch]$NOCOLOR"
   fi
   printf " $branch"
 }
 ps_git_dirty() {
   if [ "$(git status --porcelain 2> /dev/null)" ]; then
-    printf " ${BASHYELLOW}\xe2\x9c\x98${BASHNOCOLOR}"
+    printf " ${YELLOW}\xe2\x9c\x98${NOCOLOR}"
   fi
 }
 if [ "$BASH_VERSINFO" -gt 3 ]; then
-  PS1="$BASHRED\u@\h$BASHNOCOLOR:$BASHBLUE\W$BASHNOCOLOR\$(ps_status_smiley)\$(ps_git_branch)\$(ps_git_dirty) $ "
+  PS1="$RED\u$NOCOLOR@$MAGENTA\h$NOCOLOR:$BLUE\W$NOCOLOR\$(ps_status_smiley)\$(ps_git_branch)\$(ps_git_dirty) $ "
 fi
 
 if [[ $- == *i* ]]; then

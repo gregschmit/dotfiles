@@ -24,7 +24,7 @@ prompt_git_info() {
   printf " $branch$dirty"
 }
 
-PS1="%F{red}%n@%m%f:%F{blue}%.%f\$(prompt_git_info) %(?,%F{green},%F{red})%%%f "
+PS1="%F{red}%n%f@%F{magenta}%m%f:%F{blue}%.%f\$(prompt_git_info) %(?,%F{green},%F{red})%%%f "
 
 # Configure right-side smiley/frown status prompt.
 RPROMPT='%(?,%F{green}:),%F{red}%? :()%f'
