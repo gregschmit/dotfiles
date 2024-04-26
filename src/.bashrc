@@ -48,7 +48,7 @@ ps_git_dirty() {
   fi
 }
 if [ "$BASH_VERSINFO" -gt 3 ]; then
-  PS1="$BASHRED\u$BASHNOCOLOR:$BASHBLUE\W$BASHNOCOLOR\$(ps_status_smiley)\$(ps_git_branch)\$(ps_git_dirty) $ "
+  PS1="$BASHRED\u@\h$BASHNOCOLOR:$BASHBLUE\W$BASHNOCOLOR\$(ps_status_smiley)\$(ps_git_branch)\$(ps_git_dirty) $ "
 fi
 
 if [[ $- == *i* ]]; then
