@@ -61,7 +61,11 @@ elif [ -n "$BASH" ]; then
 fi
 
 # Homebrew
-eval "$(/opt/homebrew/bin/brew shellenv)"
+if [ -f "/home/linuxbrew/.linuxbrew/bin/brew" ]; then
+  eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+else if [ -f "/opt/homebrew/bin/brew" ]; then
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+fi
 
 # Java
 path_prepend "/opt/homebrew/opt/openjdk/bin"
