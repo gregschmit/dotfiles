@@ -1,4 +1,5 @@
 tap "homebrew/bundle"
+tap "timescale/tap"
 
 # Core Tools
 brew "git"
@@ -13,6 +14,7 @@ brew "zsh"
 brew "align"
 brew "htop"
 brew "sqlite"
+brew "wget"
 
 # Language Tools
 brew "nodenv"
@@ -24,12 +26,17 @@ brew "yarn"
 brew "openjdk"
 
 # Ruby Projects
+brew "anycable-go"
 brew "freetds"
+brew "graphviz"
 brew "libpq", link: true
 brew "mosquitto"
 brew "mysql-client@5.7"
 brew "openssl@1.1"
 brew "postgresql@16"
 brew "redis"
+brew "rrdtool"
+brew "shared-mime-info"
+brew "timescaledb"
 cask "wkhtmltopdf"
 brew "zlib"
