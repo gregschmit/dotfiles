@@ -19,6 +19,7 @@ brew "wget"
 # Language Tools
 brew "nodenv"
 brew "perl"
+brew "pipx"
 brew "pyenv"
 brew "rustup-init"
 brew "yarn"

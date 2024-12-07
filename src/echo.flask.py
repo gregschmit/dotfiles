@@ -1,3 +1,7 @@
+# /// script
+# dependencies = ["flask", "termcolor"]
+# ///
+
 import argparse
 from flask import Flask, Response, request
 from termcolor import colored
