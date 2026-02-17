@@ -2,11 +2,10 @@
 
 # Helper to install symlinks to `src` directory.
 
-# Remove any existing file/symlink at $2, then symlink $1 -> $2.
+# Remove any existing file/symlink at $2, then symlink $2 -> $1.
 install_symlink() {
-  echo "Removing:    $2"
+  echo "Symlinking:  $2 -> $1"
   rm -rf "$2"
-  echo "Symlinking:  $1"
   ln -s "$1" "$2"
 }
 
@@ -40,8 +39,14 @@ for path in ./src/.* ./src/*; do
 
     # If the target exists as a symlink (e.g. from a previous install), remove it.
     if [ -L "$home_dir" ]; then
-      echo "Removing:    $home_dir (symlink)"
+      echo "Found existing symlink!"
+      echo "Removing:    $home_dir symlink"
       rm -rf "$home_dir"
+
+      # Print a warning that the user should move existing files out of the dotfiles tree and then
+      # re-execute this script.
+      echo "WARNING: Move any untracked files out of the dotfiles tree and re-run this script."
+      exit 1
     fi
 
     mkdir -p "$home_dir"
