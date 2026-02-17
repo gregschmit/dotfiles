@@ -1,0 +1,44 @@
+# Install with: `grep -Ev '^(#|$)' ubuntu_pkgs.txt | xargs sudo apt install -y`.
+
+# Core Tools
+git
+# Mostly for OSC 52:
+alacritty
+tmux
+vim
+neovim
+# ollama
+zsh
+
+# Misc
+# align
+htop
+# sqlite
+wget
+
+# Language Tools
+# nodenv
+perl
+pipx
+pyenv
+# rustup-init
+# yarn
+
+# College
+# openjdk
+
+# Ruby Projects
+# anycable-go
+# freetds
+graphviz
+libpq", link: true
+mosquitto
+# mysql-client@5.7
+# openssl@1.1
+# postgresql@16
+redis
+rrdtool
+shared-mime-info
+timescaledb
+wkhtmltopdf
+zlib
