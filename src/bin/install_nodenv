@@ -1,0 +1,7 @@
+#!/bin/sh -x
+
+echo "Installing nodenv..."
+git clone https://github.com/nodenv/nodenv.git ~/.nodenv
+
+echo "Installing nodenv plugins..."
+git clone https://github.com/nodenv/nodenv-default-packages.git ~/.nodenv/plugins/nodenv-default-packages
