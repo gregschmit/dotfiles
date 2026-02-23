@@ -75,7 +75,7 @@ eval_if_exists /opt/homebrew/bin/brew shellenv
 path_prepend /opt/homebrew/opt/openjdk/bin
 
 # Nodenv
-eval_if_exists nodenv init -
+eval_if_exists ~/.nodenv/bin/nodenv init -
 
 # Perlbrew
 source_if_exists ~/perl5/perlbrew/etc/bashrc

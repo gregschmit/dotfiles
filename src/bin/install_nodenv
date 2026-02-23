@@ -1,7 +1,16 @@
 #!/bin/sh -x
 
+clone_or_pull() {
+  if [ -d "$2" ]; then
+    git -C "$2" pull
+  else
+    git clone "$1" "$2"
+  fi
+}
+
 echo "Installing nodenv..."
-git clone https://github.com/nodenv/nodenv.git ~/.nodenv
+clone_or_pull https://github.com/nodenv/nodenv.git ~/.nodenv
 
 echo "Installing nodenv plugins..."
-git clone https://github.com/nodenv/nodenv-default-packages.git ~/.nodenv/plugins/nodenv-default-packages
+clone_or_pull https://github.com/nodenv/node-build.git ~/.nodenv/plugins/node-build
+clone_or_pull https://github.com/nodenv/nodenv-default-packages.git ~/.nodenv/plugins/nodenv-default-packages
