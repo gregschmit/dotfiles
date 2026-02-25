@@ -21,4 +21,4 @@ git remote add upstream https://github.com/gregschmit/dotfiles
 git fetch upstream
 ```
 
-- Run `./install.sh` to install dotfiles; note that this will clobber existing files/directories.
+- Run `./install` to install dotfiles; note that this will clobber existing files/directories.
