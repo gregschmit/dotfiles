@@ -20,7 +20,6 @@ brew "wget"
 brew "perl"
 brew "pipx"
 brew "pyenv"
-brew "rustup-init"
 brew "yarn"
 
 # College
