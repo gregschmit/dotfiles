@@ -1,5 +1,5 @@
 {
-  "effortLevel": "max",
+  "effortLevel": "xhigh",
   "permissions": {
     "allow": [
       "Bash(bin/rails *)",
@@ -9,5 +9,6 @@
       "Bash(ruby *)",
       "WebSearch"
     ]
-  }
+  },
+  "theme": "dark"
 }
