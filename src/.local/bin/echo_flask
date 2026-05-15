@@ -1,6 +1,17 @@
+#!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["flask", "termcolor"]
+# requires-python = ">=3.9"
+# dependencies = [
+#   "flask",
+#   "termcolor",
+# ]
 # ///
+#
+# Run with uv (no manual venv or pip install needed; uv handles dependencies):
+#   uv run echo_flask
+#   uv run echo_flask --port 8080
+# Or, since this is on PATH via ~/.local/bin, just:
+#   echo_flask
 
 import argparse
 from flask import Flask, Response, request
