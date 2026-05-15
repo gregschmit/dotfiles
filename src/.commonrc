@@ -73,6 +73,15 @@ elif [ -n "$BASH" ]; then
   source_if_exists "$HOME/google-cloud-sdk/completion.bash.inc"
 fi
 
+# uv
+if [ -n "$ZSH_NAME" ]; then
+  eval_if_exists uv generate-shell-completion zsh
+  eval_if_exists uvx --generate-shell-completion zsh
+elif [ -n "$BASH" ]; then
+  eval_if_exists uv generate-shell-completion bash
+  eval_if_exists uvx --generate-shell-completion bash
+fi
+
 # Homebrew
 eval_if_exists /home/linuxbrew/.linuxbrew/bin/brew shellenv
 eval_if_exists /opt/homebrew/bin/brew shellenv
