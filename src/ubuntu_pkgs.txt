@@ -7,7 +7,6 @@ alacritty
 tmux
 vim
 neovim
-# ollama
 zsh
 
 # Misc
@@ -19,8 +18,6 @@ wget
 # Language Tools
 # nodenv
 perl
-pipx
-pyenv
 # rustup-init
 # yarn
 
@@ -40,5 +37,4 @@ redis
 rrdtool
 shared-mime-info
 timescaledb
-wkhtmltopdf
 zlib

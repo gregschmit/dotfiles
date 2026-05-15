@@ -1,3 +1,13 @@
 {
-  "effortLevel": "high"
+  "effortLevel": "max",
+  "permissions": {
+    "allow": [
+      "Bash(bin/rails *)",
+      "Bash(codex *)",
+      "Bash(gemini *)",
+      "Bash(git *)",
+      "Bash(ruby *)",
+      "WebSearch"
+    ]
+  }
 }

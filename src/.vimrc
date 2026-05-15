@@ -1,6 +1,6 @@
 runtime defaults.vim
 
-set colorcolumn=80,100
+set colorcolumn=81,101
 set number
 set relativenumber
 set showcmd
@@ -9,6 +9,7 @@ set wildmenu
 set showmatch
 
 " Overrides
+autocmd FileType gitcommit setlocal colorcolumn=73
 autocmd FileType c setlocal ts=2 sts=2 sw=2 expandtab
 autocmd FileType javascript setlocal ts=2 sts=2 sw=2 expandtab
 autocmd FileType sh setlocal ts=2 sts=2 sw=2 expandtab

@@ -7,36 +7,29 @@ cask "alacritty"  # Mostly for OSC 52.
 brew "tmux"
 brew "vim"
 brew "neovim"
-brew "ollama"
 brew "zsh"
 
 # Misc
+brew "bash"
+brew "gh"
+brew "glab"
 brew "align"
 brew "htop"
+brew "mysql-client", link: true
 brew "sqlite"
 brew "wget"
 
 # Language Tools
 brew "perl"
-brew "pipx"
-brew "pyenv"
 brew "yarn"
-
-# College
-brew "openjdk"
 
 # Ruby Projects
 brew "anycable-go"
 brew "freetds"
 brew "graphviz"
-brew "libpq", link: true
-brew "mosquitto"
-brew "mysql-client@5.7"
-brew "openssl@1.1"
-brew "postgresql@16"
+brew "openssl"
 brew "redis"
 brew "rrdtool"
 brew "shared-mime-info"
 brew "timescaledb"
-cask "wkhtmltopdf"
 brew "zlib"

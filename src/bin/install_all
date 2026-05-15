@@ -1,0 +1,15 @@
+#!/bin/sh -e
+
+dir=$(dirname "$0")
+
+for script in "$dir"/install_*; do
+    name=$(basename "$script")
+    if [ "$name" = "install_all" ]; then
+        continue
+    fi
+    if [ ! -x "$script" ]; then
+        continue
+    fi
+    printf '\n==> Running %s\n' "$name"
+    "$script"
+done

@@ -86,18 +86,6 @@ eval_if_exists ~/.nodenv/bin/nodenv init -
 # Perlbrew
 source_if_exists ~/perl5/perlbrew/etc/bashrc
 
-# Python
-path_prepend "$HOME/.pyenv"
-eval_if_exists pyenv init -
-activate() {
-  for f in ./venv ./.venv; do
-    if [ -d $f ]; then
-      . "$f/bin/activate"
-      break
-    fi
-  done
-}
-
 # Rust
 source_if_exists "$HOME/.cargo/env"
 
