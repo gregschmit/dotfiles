@@ -9,58 +9,74 @@ install_symlink() {
   ln -s "$1" "$2"
 }
 
-# Directories whose *contents* are symlinked individually into the corresponding ~/dir/ rather than
-# symlinking the directory itself. This is needed for `.config` where AppArmor allows `~/.config`
-# but doesn't follow symlinks to it.
-EXPAND_DIRS=".config"
+# Directories (relative to src/) whose *contents* are symlinked individually into ~/<dir>/ rather
+# than symlinking the directory itself. This is needed for `.config` and `.local/bin` where
+# AppArmor allows `~/.config` or `~/.local/bin` but doesn't follow symlinks to them. Entries may
+# be nested paths; ancestor directories are mkdir -p'd as needed.
+EXPAND_DIRS=".config .local/bin"
 
-# Ensure current directory is the script location.
-cd "`dirname "$0"`"
-
-for path in ./src/.* ./src/*; do
-  # Get filename and ignore "." and "..".
-  fn=$(basename $path)
-  if [ $fn = "." ] || [ $fn = ".." ]; then continue; fi;
-
-  src_file="`pwd`/src/$fn"
-
-  # Check whether this entry should be expanded entry-by-entry.
-  expand=0
-  for expand_dir in $EXPAND_DIRS; do
-    if [ "$fn" = "$expand_dir" ]; then
-      expand=1
-      break
-    fi
+# Check whether $1 exactly matches an entry in EXPAND_DIRS.
+is_expand_dir() {
+  for d in $EXPAND_DIRS; do
+    if [ "$1" = "$d" ]; then return 0; fi
   done
+  return 1
+}
 
-  if [ $expand -eq 1 ]; then
-    # Symlink each item inside the directory into ~/fn/.
-    home_dir=~/$fn
+# Check whether $1 is a strict ancestor (path prefix) of some EXPAND_DIRS entry.
+is_expand_ancestor() {
+  for d in $EXPAND_DIRS; do
+    case "$d" in
+      "$1"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
 
-    # If the target exists as a symlink (e.g. from a previous install), remove it.
+# Walk src/$1 and install entries into ~/$1. Pass "" to process the src root.
+install_dir() {
+  local rel="$1"
+  local src_dir home_dir entry_path entry child_rel
+
+  if [ -z "$rel" ]; then
+    src_dir="`pwd`/src"
+    home_dir="$HOME"
+  else
+    src_dir="`pwd`/src/$rel"
+    home_dir="$HOME/$rel"
+
+    # If a previous install symlinked this dir, remove the symlink and warn.
     if [ -L "$home_dir" ]; then
       echo "Found existing symlink!"
       echo "Removing:    $home_dir symlink"
       rm -rf "$home_dir"
-
-      # Print a warning that the user should move existing files out of the dotfiles tree and then
-      # re-execute this script.
       echo "WARNING: Move any untracked files out of the dotfiles tree and re-run this script."
       exit 1
     fi
 
     mkdir -p "$home_dir"
-    for entry_path in "$src_file"/.* "$src_file"/*; do
-      entry=$(basename "$entry_path")
-      if [ "$entry" = "." ] || [ "$entry" = ".." ]; then continue; fi;
-
-      home_entry="$home_dir/$entry"
-      install_symlink "$entry_path" "$home_entry"
-    done
-  else
-    home_file=~/$fn
-
-    # Remove and symlink the file.
-    install_symlink "$src_file" "$home_file"
   fi
-done
+
+  for entry_path in "$src_dir"/.* "$src_dir"/*; do
+    [ -e "$entry_path" ] || continue
+    entry=$(basename "$entry_path")
+    if [ "$entry" = "." ] || [ "$entry" = ".." ]; then continue; fi
+
+    if [ -z "$rel" ]; then
+      child_rel="$entry"
+    else
+      child_rel="$rel/$entry"
+    fi
+
+    if is_expand_dir "$child_rel" || is_expand_ancestor "$child_rel"; then
+      install_dir "$child_rel"
+    else
+      install_symlink "$entry_path" "$home_dir/$entry"
+    fi
+  done
+}
+
+# Ensure current directory is the script location.
+cd "`dirname "$0"`"
+
+install_dir ""

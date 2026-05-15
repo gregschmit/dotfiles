@@ -1,0 +1,76 @@
+#!/bin/sh -e
+
+ALL_TOOLS="claude nodenv ollama rustup uv"
+
+usage() {
+  echo "Install one or more developer tools."
+  echo ""
+  echo "Usage: install_tool <tool> [<tool> ...]"
+  echo "       install_tool all"
+  echo ""
+  echo "Available tools: $ALL_TOOLS"
+  exit 1
+}
+
+clone_or_pull() {
+  if [ -d "$2" ]; then
+    git -C "$2" pull
+  else
+    git clone "$1" "$2"
+  fi
+}
+
+install_claude() {
+  curl -fsSL https://claude.ai/install.sh | bash
+}
+
+install_nodenv() {
+  echo "Installing nodenv core..."
+  clone_or_pull https://github.com/nodenv/nodenv.git ~/.nodenv
+
+  echo "Installing nodenv plugins..."
+  clone_or_pull https://github.com/nodenv/node-build.git ~/.nodenv/plugins/node-build
+  clone_or_pull https://github.com/nodenv/nodenv-default-packages.git ~/.nodenv/plugins/nodenv-default-packages
+}
+
+install_ollama() {
+  curl -fsSL https://ollama.com/install.sh | sh
+}
+
+install_rustup() {
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+}
+
+install_uv() {
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+}
+
+install_one() {
+  case "$1" in
+    claude) install_claude ;;
+    nodenv) install_nodenv ;;
+    ollama) install_ollama ;;
+    rustup) install_rustup ;;
+    uv) install_uv ;;
+    *)
+      echo "Unknown tool: $1" >&2
+      usage
+      ;;
+  esac
+}
+
+if [ $# -eq 0 ]; then
+  usage
+fi
+
+for arg in "$@"; do
+  if [ "$arg" = "all" ]; then
+    for tool in $ALL_TOOLS; do
+      printf '\n==> Installing %s\n' "$tool"
+      install_one "$tool"
+    done
+  else
+    printf '\n==> Installing %s\n' "$arg"
+    install_one "$arg"
+  fi
+done
