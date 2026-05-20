@@ -1,7 +1,9 @@
 ---
-name: review
+name: code-review
 description: Comprehensive technical review of code changes in a git repo. Modes - branch, staged, unstaged/changes. Optional focus hint after the mode.
 ---
+
+# Code Review Skill
 
 Perform a comprehensive technical review of code changes in this git repository.
 
@@ -27,4 +29,16 @@ If a focus hint was supplied, weight that area heavily but still pass over the r
 
 Group findings by severity: **Blocking**, **Should fix**, **Nits**. Cite `path:line` for each. Be specific - say what's wrong and why. If uncertain, say so and what you'd need to verify.
 
-End with a one-paragraph verdict and a checklist of just the blocking items.
+Provide a small one-paragraph verdict.
+
+Print the output, but also save the output to `./CODE_REVIEW.md` in markdown format, and also wrap the output in a summary/details dropdown like this:
+
+```
+<details>
+
+<summary>Code Review: [description of the model used, version, effort level, type of review, and timestamp]</summary>
+
+[review content]
+
+</details>
+```

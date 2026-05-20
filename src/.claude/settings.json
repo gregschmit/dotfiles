@@ -1,5 +1,4 @@
 {
-  "effortLevel": "xhigh",
   "permissions": {
     "allow": [
       "Bash(bin/rails *)",
@@ -10,5 +9,7 @@
       "WebSearch"
     ]
   },
-  "theme": "dark"
+  "effortLevel": "xhigh",
+  "theme": "dark",
+  "skipDangerousModePermissionPrompt": true
 }
