@@ -5,3 +5,7 @@ node = "lts"
 
 [settings]
 python.uv_venv_auto = true
+idiomatic_version_file_enable_tools = ["ruby", "node", "python", "java"]
+
+[settings.ruby]
+compile = false

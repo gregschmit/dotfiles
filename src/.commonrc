@@ -83,6 +83,7 @@ elif [ -n "$BASH_VERSION" ]; then
 fi
 
 # Mise
+path_prepend "$HOME/.local/share/mise/shims"
 eval_if_exists mise activate
 
 # Homebrew
