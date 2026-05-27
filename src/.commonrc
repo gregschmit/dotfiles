@@ -65,41 +65,31 @@ alias snap-store-fix="LIBGL_ALWAYS_SOFTWARE=1 snap-store"
 path_prepend "$HOME/.local/bin"
 
 # Google Cloud SDK
-if [ -n "$ZSH_NAME" ]; then
+if [ -n "$ZSH_VERSION" ]; then
   source_if_exists "$HOME/google-cloud-sdk/path.zsh.inc"
   source_if_exists "$HOME/google-cloud-sdk/completion.zsh.inc"
-elif [ -n "$BASH" ]; then
+elif [ -n "$BASH_VERSION" ]; then
   source_if_exists "$HOME/google-cloud-sdk/path.bash.inc"
   source_if_exists "$HOME/google-cloud-sdk/completion.bash.inc"
 fi
 
 # uv
-if [ -n "$ZSH_NAME" ]; then
+if [ -n "$ZSH_VERSION" ]; then
   eval_if_exists uv generate-shell-completion zsh
   eval_if_exists uvx --generate-shell-completion zsh
-elif [ -n "$BASH" ]; then
+elif [ -n "$BASH_VERSION" ]; then
   eval_if_exists uv generate-shell-completion bash
   eval_if_exists uvx --generate-shell-completion bash
 fi
+
+# Mise
+eval_if_exists mise activate
 
 # Homebrew
 eval_if_exists /home/linuxbrew/.linuxbrew/bin/brew shellenv
 eval_if_exists /opt/homebrew/bin/brew shellenv
 
-# Java
-path_prepend /opt/homebrew/opt/openjdk/bin
-
-# Nodenv
-eval_if_exists ~/.nodenv/bin/nodenv init -
-
-# Perlbrew
-source_if_exists ~/perl5/perlbrew/etc/bashrc
-
 # Rust
 source_if_exists "$HOME/.cargo/env"
-
-# RVM (Must be last to avoid warnings.)
-path_append "$HOME/.rvm/bin"
-source_if_exists "$HOME/.rvm/scripts/rvm"
 
 true

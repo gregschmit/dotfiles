@@ -1,0 +1,7 @@
+[tools]
+node = "lts"
+"npm:@google/gemini-cli" = "latest"
+"npm:@openai/codex" = "latest"
+
+[settings]
+python.uv_venv_auto = true

@@ -1,6 +1,6 @@
 #!/bin/sh -e
 
-ALL_TOOLS="claude nodenv ollama rustup uv"
+ALL_TOOLS="claude mise ollama rustup uv"
 
 usage() {
   echo "Install one or more developer tools."
@@ -12,25 +12,12 @@ usage() {
   exit 1
 }
 
-clone_or_pull() {
-  if [ -d "$2" ]; then
-    git -C "$2" pull
-  else
-    git clone "$1" "$2"
-  fi
-}
-
 install_claude() {
   curl -fsSL https://claude.ai/install.sh | bash
 }
 
-install_nodenv() {
-  echo "Installing nodenv core..."
-  clone_or_pull https://github.com/nodenv/nodenv.git ~/.nodenv
-
-  echo "Installing nodenv plugins..."
-  clone_or_pull https://github.com/nodenv/node-build.git ~/.nodenv/plugins/node-build
-  clone_or_pull https://github.com/nodenv/nodenv-default-packages.git ~/.nodenv/plugins/nodenv-default-packages
+install_mise() {
+  curl https://mise.run | sh
 }
 
 install_ollama() {
@@ -48,7 +35,7 @@ install_uv() {
 install_one() {
   case "$1" in
     claude) install_claude ;;
-    nodenv) install_nodenv ;;
+    mise) install_mise ;;
     ollama) install_ollama ;;
     rustup) install_rustup ;;
     uv) install_uv ;;

@@ -36,7 +36,7 @@ Print the output, but also save the output to `./CODE_REVIEW.md` in markdown for
 ```
 <details>
 
-<summary>Code Review: [description of the model used, version, effort level, type of review, and timestamp]</summary>
+<summary>Code Review: [description of the model including version] - [model effort level] - [review mode] - [datestamp]</summary>
 
 [review content]
 
