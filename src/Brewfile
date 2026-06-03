@@ -16,6 +16,7 @@ brew "glab"
 brew "align"
 brew "htop"
 brew "mysql-client", link: true
+brew "shellcheck"
 brew "sqlite"
 brew "wget"
 

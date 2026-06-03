@@ -1,44 +1,8 @@
-# This file contains shell configuration common to both `bash` and `zsh`. This file MUST be sourced
-# by interactive shells and SHOULD be idempotent.
+# shellcheck shell=sh
 
-export PATH
-export EDITOR=vim
-
-#######################
-# Path/Source Helpers #
-#######################
-
-# Remove a path from `PATH`.
-path_remove() {
-  PATH=":$PATH:"
-  PATH="${PATH//:$1:/:}"
-  PATH="${PATH#:}"
-  PATH="${PATH%:}"
-}
-
-# Append to `PATH`, moving it to the end if it already exists.
-path_append() {
-  path_remove "$1"
-  PATH="$PATH:$1"
-}
-
-# Prepend to `PATH`, moving it to the front if it already exists.
-path_prepend() {
-  path_remove "$1"
-  PATH="$1:$PATH"
-}
-
-# Source a file if it exists.
-source_if_exists() {
-  [ -f "$1" ] && . "$1"
-}
-
-# Eval a command, with arbitrary args, if it exists.
-eval_if_exists() {
-  if command -v $1 >/dev/null; then
-    eval "$($@)"
-  fi
-}
+# Interactive-only shell configuration sourced by both `bash` and `zsh`. Env
+# vars, PATH, and helpers live in `.commonenv` (sourced before this file). MUST
+# remain idempotent.
 
 ###########
 # Aliases #
@@ -52,28 +16,27 @@ alias dockerclean='docker rm `docker ps -aq`; docker volume rm `docker volume ls
 alias collapse_routes="sed -E 's/^[[:space:]]+([A-Z])/  _  \1/g' | sed -E 's/^(.)/  \1/g' | align"
 
 # Helper to show license for all gems.
+# shellcheck disable=SC2154
 alias gem_licenses='for i in `gem list | cut -d" " -f1`; do printf "%38s `gem spec $i license`\n" $i; done'
 
 # Workaround for snap-store on Snapdragon.
 alias snap-store-fix="LIBGL_ALWAYS_SOFTWARE=1 snap-store"
 
-#########
-# Tools #
-#########
+alias claude_yolo="claude --dangerously-skip-permissions"
+alias fixdns="sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder"
 
-# XDG
-path_prepend "$HOME/.local/bin"
+#########################
+# Interactive Tool Init #
+#########################
 
-# Google Cloud SDK
+# Google Cloud SDK completion (path setup lives in `.commonenv`).
 if [ -n "$ZSH_VERSION" ]; then
-  source_if_exists "$HOME/google-cloud-sdk/path.zsh.inc"
   source_if_exists "$HOME/google-cloud-sdk/completion.zsh.inc"
 elif [ -n "$BASH_VERSION" ]; then
-  source_if_exists "$HOME/google-cloud-sdk/path.bash.inc"
   source_if_exists "$HOME/google-cloud-sdk/completion.bash.inc"
 fi
 
-# uv
+# uv completions
 if [ -n "$ZSH_VERSION" ]; then
   eval_if_exists uv generate-shell-completion zsh
   eval_if_exists uvx --generate-shell-completion zsh
@@ -81,16 +44,5 @@ elif [ -n "$BASH_VERSION" ]; then
   eval_if_exists uv generate-shell-completion bash
   eval_if_exists uvx --generate-shell-completion bash
 fi
-
-# Mise
-path_prepend "$HOME/.local/share/mise/shims"
-eval_if_exists mise activate
-
-# Homebrew
-eval_if_exists /home/linuxbrew/.linuxbrew/bin/brew shellenv
-eval_if_exists /opt/homebrew/bin/brew shellenv
-
-# Rust
-source_if_exists "$HOME/.cargo/env"
 
 true

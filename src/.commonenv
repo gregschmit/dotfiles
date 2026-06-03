@@ -1,0 +1,81 @@
+# shellcheck shell=sh
+
+# Env vars, PATH, and helper functions loaded for ALL shells — including
+# non-interactive (scripts, `bash -c`, cron, IDEs). Sourced from `.zshenv` and
+# `.zprofile` (zsh) and `.bash_profile` and `.bashrc` (bash). For
+# non-interactive bash, BASH_ENV (set below) causes this file to be sourced
+# automatically. MUST remain idempotent and free of interactive-only constructs.
+
+export EDITOR=vim
+
+# Ensure non-interactive bash subshells source this file.
+export BASH_ENV="$HOME/.commonenv"
+
+#######################
+# Path/Source Helpers #
+#######################
+
+# Remove a path from `PATH`.
+path_remove() {
+  _new=
+  _IFS=$IFS
+  IFS=:
+  for _p in $PATH; do
+    [ "$_p" = "$1" ] && continue
+    _new=${_new:+$_new:}$_p
+  done
+  IFS=$_IFS
+  PATH=$_new
+  unset _new _IFS _p
+}
+
+# Append to `PATH`, moving it to the end if it already exists.
+path_append() {
+  path_remove "$1"
+  PATH="$PATH:$1"
+}
+
+# Prepend to `PATH`, moving it to the front if it already exists.
+path_prepend() {
+  path_remove "$1"
+  PATH="$1:$PATH"
+}
+
+# Source a file if it exists.
+source_if_exists() {
+  # shellcheck disable=SC1090
+  [ -f "$1" ] && . "$1"
+}
+
+# Eval a command, with arbitrary args, if it exists.
+eval_if_exists() {
+  if command -v "$1" >/dev/null; then
+    eval "$("$@")"
+  fi
+}
+
+#########
+# Paths #
+#########
+
+# XDG
+path_prepend "$HOME/.local/bin"
+
+# Google Cloud SDK (path only; completion lives in `.commonrc`)
+if [ -n "$ZSH_VERSION" ]; then
+  source_if_exists "$HOME/google-cloud-sdk/path.zsh.inc"
+elif [ -n "$BASH_VERSION" ]; then
+  source_if_exists "$HOME/google-cloud-sdk/path.bash.inc"
+fi
+
+# Mise shims for non-interactive contexts (scripts, `bin/dev`, cron, IDE-spawned
+# shells).
+path_prepend "$HOME/.local/share/mise/shims"
+
+# Homebrew
+eval_if_exists /opt/homebrew/bin/brew shellenv
+
+# Rust
+source_if_exists "$HOME/.cargo/env"
+
+true

@@ -1,5 +1,5 @@
-# in .bash_profile, source this file, like this:
-#   [ -f ~/.bashrc ] && . ~/.bashrc
+# Source env (PATH, helpers, exports).
+[ -f ~/.commonenv ] && . ~/.commonenv
 
 # Use `vi` mode.
 set -o vi
