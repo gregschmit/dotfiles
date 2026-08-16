@@ -9,18 +9,7 @@
       "WebSearch"
     ]
   },
-  "extraKnownMarketplaces": {
-    "rgnets-plugins": {
-      "source": {
-        "source": "git",
-        "url": "git@git.rgnets.com:rgnets/claude-plugins.git"
-      }
-    }
-  },
-  "effortLevel": "xhigh",
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
-  "enabledPlugins": {
-    "gns@rgnets-plugins": true
-  }
+  "tui": "fullscreen"
 }
