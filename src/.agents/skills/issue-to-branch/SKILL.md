@@ -7,6 +7,10 @@ description: Start work on a tracker issue - read it, branch from primary, make 
 
 Follow `git-forge` for `gh` vs `glab` and the glab `--repo` rule.
 
+## 0. Check the working tree
+
+`git status --porcelain`. If dirty (uncommitted changes or untracked files that would be affected), stop and ask the user what to do — commit, stash, or discard — before branching.
+
 ## 1. Read the issue
 
 Fetch the issue by number. Read title, body, and every comment before proposing an approach.

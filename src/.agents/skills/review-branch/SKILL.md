@@ -7,6 +7,10 @@ description: Review a branch - either the local branch against primary, or a PR/
 
 Follow `git-forge` for CLI choice and the glab `--repo` rule.
 
+## 0. Check the working tree
+
+`git status --porcelain`. If dirty (uncommitted changes or untracked files that would be affected), stop and ask the user what to do — commit, stash, or discard — before checking out or merging.
+
 ## 1. Pick the mode
 
 - **PR/MR number supplied** (or currently open on GitHub/GitLab for the current branch): fetch the PR/MR state — title, description, and every comment/thread (top-level and inline). See `git-forge` for why the API subcommands beat `view --comments` when completeness matters. Note unresolved threads separately. Then check the branch out via the forge CLI (`gh pr checkout N`, or `glab mr checkout N --repo ...`).
