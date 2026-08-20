@@ -1,19 +1,18 @@
 ---
 name: code-review
-description: Comprehensive technical review of code changes in a git repo. Modes - branch, staged, unstaged/changes. Optional focus hint after the mode.
+description: Comprehensive technical review of code changes in a git repo, plus a suggested commit message. Modes - branch, changes. Optional focus hint after the mode.
 ---
 
 # Code Review Skill
 
-Perform a comprehensive technical review of code changes in this git repository.
+Perform a comprehensive technical review of code changes in this git repository, and draft a commit message alongside it.
 
 ## Mode
 
 Parse `$1` as the mode; remaining tokens in `$ARGUMENTS` are an optional focus hint.
 
-- `branch` / empty / unrecognized → diff the current branch against the repo's primary branch. If already on primary, stop - nothing to review.
-- `staged` → staged changes only
-- `unstaged` or `changes` → unstaged working-tree changes
+- `branch` / empty / unrecognized → diff the current branch against the repo's primary branch. If already on primary and the focus hint doesn't explain what to look at, then stop - nothing to review.
+- `changes` → all working-tree changes vs. `HEAD`.
 
 If `$1` is unrecognized, treat all of `$ARGUMENTS` as the focus hint. If the diff is empty, say so and stop.
 
@@ -25,13 +24,20 @@ Cover where applicable: correctness (logic, error handling, nil paths, concurren
 
 If a focus hint was supplied, weight that area heavily but still pass over the rest.
 
+## Commit Message
+
+Always draft a commit message alongside the review, following the repo's commit conventions (terse, 50/72; body a short paragraph on the _why_).
+
+- `branch` mode → the message for the branch as a whole (what a squash-merge would use). If the PR/MR description or a comment already supplies one (a fenced block reading like a commit message — ≤50-char subject, optional body), use it as-is.
+- `changes` mode → the message for these changes as a single commit.
+
 ## Output
 
-Group findings by severity: **Blocking**, **Should fix**, **Nits**. Cite `path:line` for each. Be specific - say what's wrong and why. If uncertain, say so and what you'd need to verify.
+Group review findings by severity: **Blocking**, **Should fix**, **Nits**. Cite `path:line` for each. Be specific - say what's wrong and why. If uncertain, say so and what you'd need to verify.
 
 Provide a small one-paragraph verdict.
 
-Print the output, but also save the output to `./CODE_REVIEW.md` in markdown format, and also wrap the output in a summary/details dropdown like this:
+Print the output, and also save it to `./CODE_REVIEW.md` in markdown format. Wrap both the review and the commit message in their own `<details>` blocks so a copy-paste into a PR/MR comment stays tidy:
 
 ```
 <details>
@@ -39,6 +45,14 @@ Print the output, but also save the output to `./CODE_REVIEW.md` in markdown for
 <summary>Code Review: [description of the model including version] - [model effort level] - [review mode] - [datestamp]</summary>
 
 [review content]
+
+</details>
+
+<details>
+
+<summary>Suggested Commit Message</summary>
+
+[commit message inside a fenced code block for easy copy]
 
 </details>
 ```

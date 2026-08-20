@@ -33,17 +33,11 @@ List files primary changed since the branch point and files this branch touches.
 
 ## 4. Run the code review
 
-Invoke the `code-review` skill in `branch` mode against the current state. It writes `./CODE_REVIEW.md`.
+Invoke the `code-review` skill in `branch` mode against the current state. It writes `./CODE_REVIEW.md` and includes a suggested squash-merge commit message. Do not push that message or edit the PR/MR description yourself — it's for the human to copy into the squash box.
 
-## 5. Squash commit message (PR/MR mode only)
-
-When the MR is squash-merged, the squash message is the commit that lands on primary — so it matters. Check whether one is already supplied: a fenced code block in the MR description, or a comment, that reads as a commit message (a ≤50-char subject line, optionally followed by a body). If present, use it as-is — do not rewrite it.
-
-If none is supplied, generate one from the branch's commits and diff, following the repo's commit conventions (terse, 50/72; body a short paragraph on the _why_). Surface it to the user in a fenced block so it can be copied into the squash box, and include it when posting the review (a labeled section below the code-review `<details>`). Do not push it or edit the MR description yourself.
-
-## 6. Ask the user which path
+## 5. Ask the user which path
 
 Confirm before either — both are visible to other humans:
 
-- **Post the review** — only if a PR/MR exists. Top-level comment or review submission, whichever fits. Preserve the code-review markdown, including the `<details>` wrapper.
+- **Post the review** — only if a PR/MR exists. Top-level comment or review submission, whichever fits. Post the full code-review output as-is, preserving both `<details>` blocks (review and suggested commit message).
 - **Fix the findings** — work through Blocking and Should-fix items, commit (confirm the message first), push, and if a PR/MR exists, post a short comment noting what was addressed and what was intentionally left.
