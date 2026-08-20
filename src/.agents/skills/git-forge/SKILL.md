@@ -34,3 +34,19 @@ glab api -X POST "/projects/<id>/merge_requests/<iid>/discussions" \
 ```
 
 `discussions` starts a resolvable thread; use `/notes` for a plain comment. The header is required — without it glab sends no content-type and the API returns HTTP 415.
+
+### Inline suggested changes
+
+Both forges support suggestion blocks that reviewers accept in one click. The comment must anchor to a line that exists in the PR/MR's current head SHA on the server — if you merged primary locally without pushing, the position will be rejected.
+
+**gh** — POST to `/repos/{owner}/{repo}/pulls/{N}/reviews` with `event: "COMMENT"` and a `comments` array; each entry has `path`, `line` (or `start_line`+`line` for a range), `side: "RIGHT"`, and a body containing a fenced suggestion block:
+
+    ```suggestion
+    corrected line(s) here
+    ```
+
+**glab** — POST to `/projects/<id>/merge_requests/<iid>/discussions` with a `position` object (`base_sha`, `head_sha`, `start_sha`, `position_type: "text"`, `new_path`, `new_line`) and a note body containing a suggestion block. Same JSON-on-stdin dance as above — `--field` still chokes on newlines. The suggestion syntax `suggestion:-N+M` means replace `N` lines above the anchor and `M` below:
+
+    ```suggestion:-0+0
+    replacement for the anchor line only
+    ```

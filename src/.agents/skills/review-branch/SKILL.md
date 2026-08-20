@@ -44,6 +44,7 @@ Invoke the `code-review` skill in `branch` mode against the current state. It wr
 Confirm before either — both are visible to other humans:
 
 - **Post the review** — only if a PR/MR exists. Top-level comment or review submission, whichever fits. Post the full code-review output as-is, preserving both `<details>` blocks (review and suggested commit message).
+  - **Optional add-on: inline suggested changes.** Only offer this when all of the following hold: PR/MR mode, the §3 merge-primary was requested, merged cleanly, and was pushed (otherwise inline anchors drift from the server-side head SHA and the API rejects the position). If the user asks for it, post each finding that maps to a single diff hunk as an inline suggestion — see `git-forge` for the gh/glab APIs. Skip findings that don't map cleanly.
 - **Fix the findings** — work through Blocking and Should-fix items in the worktree, commit (confirm the message first), push, and if a PR/MR exists, post a short comment noting what was addressed and what was intentionally left.
 
 ## End: report the worktree
