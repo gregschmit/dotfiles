@@ -12,9 +12,11 @@ Follow these software development guidelines when practical:
 - Don't reference old behavior unless writing an upgrade/migration guide.
 - Commit messages: terse, 50/72 line length. Body is a short paragraph unless the commit warrants more. Use `fmt -w 72` to help you wrap lines properly, but note that it clobbers lists, which is why I prefer paragraphs.
 
-Agent worktrees live under `/tmp/agent-worktrees/<origin-path>/<branch>`, where `<origin-path>` is the owner/repo path from the origin remote (e.g. `gregschmit/dotfiles`, `rgnets/rxg`) and `<branch>` may itself contain slashes which should be treated as a subpath:
+Agent worktrees live under `/tmp/agent-worktrees/<origin-path>/<branch>`, where `<origin-path>` is the owner/repo path from the origin remote (e.g. `gregschmit/dotfiles`, `rgnets/rxg`) and `<branch>` may itself contain slashes:
 - Only create a worktree if your skill demands one. Skills that use them (`issue-to-branch`, `review-branch`) print the worktree path when they finish.
-- If you are already in a worktree, stay there and just work like normal unless the worktree path doesn't match your work; don't try to create another worktree.
-- If you want to create a worktree and it already exists, ask reuse / recreate / abort.
+- If you're already in a worktree and it matches what the user asked for, stay there; otherwise create a new one per the convention below.
+- When you would create a worktree at a path that already exists, ask reuse / recreate / abort — do not silently overwrite.
 - Worktrees persist across runs so their outputs (edits, `CODE_REVIEW.md`) remain reachable. When you're done, ask the user if you should clean up the worktree with `git worktree remove <path>`.
-- When creating a new branch, use the format `<local_username>/<short-kebab-slug>` — short and human-readable, e.g. `gns/fix-portal-devices-ui`. Always branch from the primary branch unless explicitly told otherwise. Do not encode the issue number in the branch name. If creating a new branch in a worktree, use `git worktree add -b <branch> <path> origin/<primary>`.
+- New branch in a worktree: `git fetch origin`, then `git worktree add -b <branch> <path> origin/<primary>`.
+- Existing branch in a worktree: `git fetch origin`, `git worktree add <path> origin/<primary>`, `cd` in, `git pull`, then attach the target — `gh pr checkout N` / `glab mr checkout N --repo …` for PR/MR mode, or `git checkout <branch> && git pull` for a local branch.
+- New branches use `<$USER>/<short-kebab-slug>` — short and human-readable, e.g. `gns/fix-portal-devices-ui`. Always branch from primary unless told otherwise. Do not encode the issue number in the branch name.

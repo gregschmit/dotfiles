@@ -15,13 +15,17 @@ Never let `glab` fall back to gitlab.com. On every `glab` command, pass `--repo 
 
 `gh` needs no equivalent — it reads the remote correctly.
 
-## Comment collection is the fiddly part
+## Forge API workarounds
+
+### Comment collection
 
 Basic verbs (`view`, `checkout`, `create`) are safe to improvise. Collecting every comment on a PR/MR is not — GitHub splits issue comments, review submissions, and inline review comments across three endpoints; GitLab uses discussions/notes with a different shape. When completeness matters, prefer the API subcommand (`gh api`, `glab api`) over the higher-level `view --comments`, and dump raw JSON to a scratch file to read.
 
-## Posting a multi-line comment (glab)
+### Posting a multi-line comment
 
-`glab api --field body@file` does NOT read files, and `--field` chokes on newlines. For a real review body, POST a JSON payload on stdin with an explicit content-type header:
+**gh** — straightforward, no workaround: `gh pr comment N --body-file <file>` for a top-level comment, `gh pr review N --comment --body-file <file>` for a review submission.
+
+**glab** — `glab api --field body@file` does NOT read files, and `--field` chokes on newlines. POST a JSON payload on stdin with an explicit content-type header:
 
 ```
 python3 -c "import json;print(json.dumps({'body':open('REVIEW.md').read()}))" > /tmp/p.json

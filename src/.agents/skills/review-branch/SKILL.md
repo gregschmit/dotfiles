@@ -9,7 +9,12 @@ Follow `git-forge` for CLI choice and the glab `--repo` rule.
 
 ## 1. Prepare a worktree, if not already inside one
 
-Query the forge for the PR/MR's head branch name. Otherwise use the branch the user provided.
+Determine the target branch:
+
+- PR/MR mode: query the forge (`gh pr view N --json headRefName -q .headRefName`, or the glab equivalent with `--repo`).
+- Local mode: use the branch the user provides.
+
+Follow the AGENTS.md worktree convention (existing branch). If git refuses because the branch is checked out elsewhere — rare, only if the main clone happens to sit on it — surface the error and ask the user what to do.
 
 `cd` into the worktree. All remaining steps happen there.
 

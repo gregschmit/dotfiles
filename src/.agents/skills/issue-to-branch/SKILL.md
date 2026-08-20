@@ -15,9 +15,9 @@ Fetch the issue by number. Read title, body, and every comment before proposing 
 
 Search open PRs/MRs referencing the issue. If one exists, stop and ask whether to continue it rather than open a new one.
 
-## 3. Create a new branch inside a worktree
+## 3. Branch
 
-`cd` into the worktree. All remaining steps happen there.
+Create a new branch inside a worktree. `cd` into the worktree. All remaining steps happen there.
 
 ## 4. Work
 
