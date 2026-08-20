@@ -20,3 +20,12 @@ Agent worktrees live under `/tmp/agent-worktrees/<origin-path>/<branch>`, where 
 - New branch in a worktree: `git fetch origin`, then `git worktree add -b <branch> <path> origin/<primary>`.
 - Existing branch in a worktree: `git fetch origin`, `git worktree add <path> origin/<primary>`, `cd` in, `git pull`, then attach the target — `gh pr checkout N` / `glab mr checkout N --repo …` for PR/MR mode, or `git checkout <branch> && git pull` for a local branch.
 - New branches use `<$USER>/<short-kebab-slug>` — short and human-readable, e.g. `gns/fix-portal-devices-ui`. Always branch from primary unless told otherwise. Do not encode the issue number in the branch name.
+
+Every comment an agent posts to GitHub or GitLab (top-level, review, inline suggestion, follow-up) starts with this attribution header on its own line, then a blank line, then the content:
+
+    <sub>🤖 <b>Agent</b> · <model> · <effort> · <operation></sub>
+
+- `<model>` — e.g. `Claude Opus 5 (1M)`. Emit what you know; omit fields you can't confirm rather than guess.
+- `<effort>` — e.g. `high`, `fast`. Omit if unknown.
+- `<operation>` — the skill's short label, e.g. `code-review branch`, `review followup`, `fix followup`.
+- Segments joined by ` · ` (U+00B7 middle dot with a space on each side), never dashes or pipes.

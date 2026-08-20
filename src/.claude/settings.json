@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Read(~/.agents/skills/**)",
+      "Read(~/.agents/**)",
+      "Read(~/git/dotfiles)",
       "Bash(bin/rails *)",
       "Bash(codex *)",
       "Bash(gemini *)",
