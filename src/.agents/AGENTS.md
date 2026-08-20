@@ -23,9 +23,9 @@ Agent worktrees live under `/tmp/agent-worktrees/<origin-path>/<branch>`, where 
 
 Every comment an agent posts to GitHub or GitLab (top-level, review, inline suggestion, follow-up) starts with this attribution header on its own line, then a blank line, then the content:
 
-    <sub>🤖 <b>Agent</b> · <model> · <effort> · <operation></sub>
+    <sub>🤖 **Agent** · [model] · [effort] · [operation]</sub>
 
-- `<model>` — e.g. `Claude Opus 5 (1M)`. Emit what you know; omit fields you can't confirm rather than guess.
-- `<effort>` — e.g. `high`, `fast`. Omit if unknown.
-- `<operation>` — the skill's short label, e.g. `code-review branch`, `review followup`, `fix followup`.
+- `[model]` — e.g. `Claude Opus 5 (1M)`. Emit what you know (ideally name, version, and context window); omit information you can't confirm rather than guess.
+- `[effort]` — e.g. `high`, `fast`. Omit if unknown.
+- `[operation]` — the skill's short label, e.g. `code-review branch`, `review followup`, `fix followup`.
 - Segments joined by ` · ` (U+00B7 middle dot with a space on each side), never dashes or pipes.
