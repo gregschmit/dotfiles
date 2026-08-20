@@ -10,4 +10,4 @@ Follow these software development guidelines when practical:
 - Lean on ASD-STE100 Simplified Technical English as a guide (not a strict rule — deviate when it reads better) and write with clarity, simplicity, brevity, and humanity (Zinsser).
 - Keep comments terse. Explain WHY, not WHAT — unless the code is genuinely hard to follow.
 - Don't reference old behavior unless writing an upgrade/migration guide.
-- Commit messages: terse, 50/72 line length. Body is a short paragraph unless the commit warrants more.
+- Commit messages: terse, 50/72 line length. Body is a short paragraph unless the commit warrants more. Use `fmt -w 72` to help you wrap lines properly, but note that it clobbers lists, which is why I prefer paragraphs.

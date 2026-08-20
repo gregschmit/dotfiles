@@ -21,7 +21,7 @@ If `$1` is unrecognized, treat all of `$ARGUMENTS` as the focus hint. If the dif
 
 Read the diff, then read surrounding code in each modified file.
 
-Cover where applicable: correctness (logic, error handling, nil paths, concurrency, resource leaks), security (input validation, authn/authz, secrets, injection, SSRF), performance (complexity, N+1, blocking I/O, hot-path allocation), API design (signatures, backwards compat, error contracts), idioms and project conventions (use neighboring code as the reference, not generic style guides), tests (new-behavior coverage, edge cases, missing negatives), maintainability (clarity, duplication, lying comments, dead code), and ops (migrations, config, deploy ordering, rollback safety).
+Cover where applicable: correctness (logic, error handling, nil paths, concurrency, resource leaks), security (input validation, authn/authz, secrets, injection, SSRF), performance (complexity, N+1, blocking I/O, hot-path allocation), API design (signatures, backwards compat, error contracts), idioms and project conventions (use neighboring code as the reference, not generic style guides), tests (new-behavior coverage, edge cases, missing negatives), maintainability (clarity, duplication, lying comments, dead code), and ops (migrations, config, deploy ordering, rollback safety; a boolean DB column should be `NOT NULL` with a default unless it is genuinely a 3-state flag where `NULL` carries its own meaning).
 
 If a focus hint was supplied, weight that area heavily but still pass over the rest.
 

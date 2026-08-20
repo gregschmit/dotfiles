@@ -35,7 +35,13 @@ List files primary changed since the branch point and files this branch touches.
 
 Invoke the `code-review` skill in `branch` mode against the current state. It writes `./CODE_REVIEW.md`.
 
-## 5. Ask the user which path
+## 5. Squash commit message (PR/MR mode only)
+
+When the MR is squash-merged, the squash message is the commit that lands on primary — so it matters. Check whether one is already supplied: a fenced code block in the MR description, or a comment, that reads as a commit message (a ≤50-char subject line, optionally followed by a body). If present, use it as-is — do not rewrite it.
+
+If none is supplied, generate one from the branch's commits and diff, following the repo's commit conventions (terse, 50/72; body a short paragraph on the _why_). Surface it to the user in a fenced block so it can be copied into the squash box, and include it when posting the review (a labeled section below the code-review `<details>`). Do not push it or edit the MR description yourself.
+
+## 6. Ask the user which path
 
 Confirm before either — both are visible to other humans:
 

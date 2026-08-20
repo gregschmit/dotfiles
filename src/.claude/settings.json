@@ -1,6 +1,7 @@
 {
   "permissions": {
     "allow": [
+      "Read(~/.agents/skills/**)",
       "Bash(bin/rails *)",
       "Bash(codex *)",
       "Bash(gemini *)",
@@ -11,5 +12,6 @@
   },
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
-  "tui": "fullscreen"
+  "tui": "fullscreen",
+  "effortLevel": "xhigh"
 }
