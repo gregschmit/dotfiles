@@ -37,12 +37,14 @@ Group review findings by severity: **Blocking**, **Should fix**, **Nits**. Cite 
 
 Provide a small one-paragraph verdict.
 
+`[reviewed commit]` is `git rev-parse --short HEAD`, with `+dirty` appended in `changes` mode or whenever the working tree is dirty. It pins the review to the code it read, so a later reader — or a later agent deciding whether a re-review is due — can tell at a glance whether it still applies.
+
 Print the output, and also save it to `./CODE_REVIEW.md` in markdown format. Wrap both the review and the commit message in their own `<details>` blocks so a copy-paste into a PR/MR comment stays tidy:
 
 ```
 <details>
 
-<summary>Code Review: [description of the model including version] - [model effort level] - [review mode] - [datestamp]</summary>
+<summary>Code Review: [review mode] - [reviewed commit] - [datestamp]</summary>
 
 [review content]
 
