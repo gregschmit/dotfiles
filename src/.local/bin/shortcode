@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+
+"""Print random short codes for referring to code-review findings.
+
+Usage: shortcode [count]      # anything else prints one code
+
+4 characters of Crockford base32 (no I, L, O, or U) so they survive being read
+aloud. Always letter-first, so a code is never mistaken for an issue number that
+GitLab or GitHub would autolink.
+"""
+
+import random
+import sys
+
+LETTERS = "ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford base32 drops I, L, O, and U.
+ALPHABET = "0123456789" + LETTERS
+MAX = 999  # So a typo'd count prints a lot rather than forever.
+
+try:
+    count = max(1, min(int(sys.argv[1]), MAX))
+except (IndexError, ValueError):
+    count = 1
+
+for _ in range(count):
+    print(random.choice(LETTERS) + "".join(random.choices(ALPHABET, k=3)))

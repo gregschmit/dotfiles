@@ -13,7 +13,7 @@ Follow these software development guidelines when practical:
 - Commit messages: terse, 50/72 line length. Body is a short paragraph unless the commit warrants more. Use `fmt -w 72` to help you wrap lines properly, but note that it clobbers lists, which is why I prefer paragraphs.
 
 Agent worktrees live under `/tmp/agent-worktrees/<origin-path>/<branch>`, where `<origin-path>` is the owner/repo path from the origin remote (e.g. `gregschmit/dotfiles`, `rgnets/rxg`) and `<branch>` may itself contain slashes:
-- Only create a worktree if your skill demands one. Skills that use them (`issue-to-branch`, `review-branch`, `review-prs`) print the worktree path when they finish.
+- Only create a worktree if your skill demands one. Skills that use them (`issue-to-branch`, `review-branch`, `review-branches`) print the worktree path when they finish.
 - If you're already in a worktree and it matches what the user asked for, stay there; otherwise create a new one per the convention below.
 - When you would create a worktree at a path that already exists, ask reuse / recreate / abort — do not silently overwrite.
 - Worktrees persist across runs so their outputs (edits, `CODE_REVIEW.md`) remain reachable. When you're done, ask the user if you should clean up the worktree with `git worktree remove <path>`.

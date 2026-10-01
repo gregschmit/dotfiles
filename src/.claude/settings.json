@@ -11,8 +11,9 @@
       "WebSearch"
     ]
   },
+  "effortLevel": "max",
+  "tui": "fullscreen",
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
-  "tui": "fullscreen",
-  "effortLevel": "xhigh"
+  "agentPushNotifEnabled": true
 }

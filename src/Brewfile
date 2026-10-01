@@ -18,6 +18,7 @@ brew "htop"
 brew "mysql-client", link: true
 brew "shellcheck"
 brew "sqlite"
+brew "sshuttle"
 brew "wget"
 
 # Language Tools

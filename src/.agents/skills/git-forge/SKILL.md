@@ -15,6 +15,10 @@ Never let `glab` fall back to gitlab.com. On every `glab` command, pass `--repo 
 
 `gh` needs no equivalent — it reads the remote correctly.
 
+## Auth errors: stop and ask
+
+If a forge CLI fails on authentication, authorization, or permissions — expired login session, missing or invalid token, 401/403, `gh auth`/`glab auth` complaints, SSO or 2FA prompts — stop and ask the user how to proceed. Do not work around it, retry with another path, or continue and report it at the end.
+
 ## Forge API workarounds
 
 ### Comment collection

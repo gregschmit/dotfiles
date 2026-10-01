@@ -35,7 +35,17 @@ Always draft a commit message alongside the review, following the repo's commit 
 
 Group review findings by severity: **Blocking**, **Should fix**, **Nits**. Cite `path:line` for each. Be specific - say what's wrong and why. If uncertain, say so and what you'd need to verify.
 
+Give each finding a short code and lead with it: `[K7R2] path:line`. Run `shortcode <number of findings>` once and spend the codes it prints. Codes rather than counters because GitLab autolinks `#1` to issue 1, and because a code stays unambiguous when two agents review the same branch. If `shortcode` command is not found, make your own — 4 characters from `0123456789ABCDEFGHJKMNPQRSTVWXYZ`, the first one a letter.
+
 Provide a small one-paragraph verdict.
+
+End the verdict with a **merge-readiness confidence** — how sure you are that merging this as-is is safe — and one line of justification. A reader working through a stack of reviews uses this to pick what to take first.
+
+- **High** — no blocking or should-fix findings, and the whole change fits in your head: comments/docs/formatting only, a mechanical rename, a self-evident one- or two-line fix, a dependency or config bump with no behavioral reach. You can see it is correct by reading it.
+- **Medium** — you read every hunk and believe it's right, but something is unverified: tests not run, a caller not traced, a subsystem you know less well, or an open should-fix finding.
+- **Low** — you cannot see the whole picture, or it plainly isn't ready. Any blocking finding lands here, as does a large or wide-reaching diff, risky territory (concurrency, authn/authz, migrations, money, data loss), behavior only a real run would prove, or unresolved review threads that change what "correct" means.
+
+This rates readiness, not the author: Low means either you could not verify it or it needs work. Either way it is not the one to pick up first.
 
 `[reviewed commit]` is `git rev-parse --short HEAD`, with `+dirty` appended in `changes` mode or whenever the working tree is dirty. It pins the review to the code it read, so a later reader — or a later agent deciding whether a re-review is due — can tell at a glance whether it still applies.
 
