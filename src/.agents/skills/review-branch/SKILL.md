@@ -49,8 +49,11 @@ Confirm before either — both are visible to other humans:
 
 ## End: report the worktree
 
-Print the worktree path, the review file, and the merge-readiness confidence the review landed on, e.g.
+Print the worktree path, the review file, and the summary row the review landed on, e.g.
 
     Worktree:   /tmp/agent-worktrees/rgnets/rxg/feature/new-thing
     Review:     /tmp/agent-worktrees/rgnets/rxg/feature/new-thing/CODE_REVIEW.md
-    Confidence: High — comments only, no code paths touched
+    Confidence: High
+    Difficulty: Trivial
+    Findings:   0 blocking / 2 should-fix / 3 nits
+    Why:        comments only, no code paths touched

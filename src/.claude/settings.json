@@ -15,5 +15,5 @@
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
   "agentPushNotifEnabled": true,
-  "effortLevel": "max"
+  "effortLevel": "xhigh"
 }

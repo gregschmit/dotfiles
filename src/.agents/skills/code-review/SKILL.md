@@ -39,19 +39,36 @@ Give each finding a short code and lead with it: `[K7R2] path:line`. Run `shortc
 
 Provide a small one-paragraph verdict.
 
-End the verdict with a **merge-readiness confidence** — how sure you are that merging this as-is is safe — and one line of justification. A reader working through a stack of reviews uses this to pick what to take first.
+A one-row **summary table** sits above the collapsed review, so the status reads at a glance without expanding anything:
 
-- **High** — no blocking or should-fix findings, and the whole change fits in your head: comments/docs/formatting only, a mechanical rename, a self-evident one- or two-line fix, a dependency or config bump with no behavioral reach. You can see it is correct by reading it.
-- **Medium** — you read every hunk and believe it's right, but something is unverified: tests not run, a caller not traced, a subsystem you know less well, or an open should-fix finding.
-- **Low** — you cannot see the whole picture, or it plainly isn't ready. Any blocking finding lands here, as does a large or wide-reaching diff, risky territory (concurrency, authn/authz, migrations, money, data loss), behavior only a real run would prove, or unresolved review threads that change what "correct" means.
+| Confidence | Difficulty | Findings (B/S/N) | Why                                  |
+| :--------- | :--------- | :--------------: | :----------------------------------- |
+| High       | Trivial    |      0/2/3       | comments only, no code paths touched |
 
-This rates readiness, not the author: Low means either you could not verify it or it needs work. Either way it is not the one to pick up first.
+`Findings` counts Blocking/Should-fix/Nits from the review below, and `Why` is a very short one-line justification covering confidence/difficulty ratings.
+
+**Confidence** — how sure you are that merging this as-is is safe. You should consider primarily code correctness and completeness, but also the size/scope of the changes, and how thoroughly they can be verified.
+
+- **High** — you can account for every behavior change and nothing material is left in doubt. Two routes get here: the change is small enough to see correct by reading, or it is large but well covered — you traced the paths that matter, tests exercise the risky behavior and pass, and the design fits the surrounding code.
+- **Medium** — you read every hunk and believe it's right, but something material is unverified: tests not run or missing for a risky path, a caller not traced, or a subsystem you know less well. An open should-fix finding also lands here.
+- **Low** — you cannot account for the behavior, or it plainly isn't ready. Any blocking finding, risky territory you could not verify (concurrency, authn/authz, migrations, money, data loss), behavior only a real run would prove, or unresolved review threads that change what "correct" means.
+
+**Difficulty** — how much work it would take to get this into a mergeable state. Weigh how complex the underlying problem is, how much of it is already done, what is left to finish, and how much testing the change demands. Judge the remaining work, not the size of the diff: a 2000-line mechanical rename with no findings is Trivial, while a 10-line authz change with a blocking bug and no test is High.
+
+- **Trivial** — merge it as it stands, or after one obvious one-line fix. Existing tests are enough.
+- **Low** — a few localized fixes, no design decisions. Existing tests cover it, or one new test does.
+- **Medium** — a focused session: several findings, or one fix that isn't obvious. Needs a new test or a manual run to confirm, but the approach is settled.
+- **High** — the approach is wrong or unfinished, risky behavior is untested, or someone has to make a call before this can be finished.
 
 `[reviewed commit]` is `git rev-parse --short HEAD`, with `+dirty` appended in `changes` mode or whenever the working tree is dirty. It pins the review to the code it read, so a later reader — or a later agent deciding whether a re-review is due — can tell at a glance whether it still applies.
 
 Print the output, and also save it to `./CODE_REVIEW.md` in markdown format. Wrap both the review and the commit message in their own `<details>` blocks so a copy-paste into a PR/MR comment stays tidy:
 
 ```
+| Confidence   | Difficulty   | Findings (B/S/N) | Why                      |
+| :----------- | :----------- | :--------------: | :----------------------- |
+| [confidence] | [difficulty] |   [b]/[s]/[n]    | [one-line justification] |
+
 <details>
 
 <summary>Code Review: [review mode] - [reviewed commit] - [datestamp]</summary>

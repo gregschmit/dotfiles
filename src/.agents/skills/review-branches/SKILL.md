@@ -1,6 +1,7 @@
 ---
 name: review-branches
 description: Review a batch of branches/PRs/MRs in one pass - collect all the review-branch decisions up front, then fan out one agent per target, each in its own worktree. Use when the user says "review my PRs", "review these branches", "review the pipeline-complete MRs", or similar. For a single target, use review-branch instead.
+disable-model-invocation: true
 ---
 
 # Review a batch of branches
@@ -47,16 +48,16 @@ Do not launch until all four are answered.
 
 Run `git fetch origin` once in the main clone first, so the agents don't fight over the lock.
 
-Launch the agents in a single message so they run concurrently. Cap it around six at a time and queue the rest. Give each agent one target (a PR/MR number or a branch name), the §3 answers verbatim, and these rules:
+Launch the agents in a single message so they run concurrently. Cap it around ten at a time and queue the rest. Give each agent one target (a PR/MR number or a branch name), the §3 answers verbatim, and these rules:
 
 - Follow the `review-branch` skill end to end.
 - The §3 answers are the user's answers — never prompt. Anything they don't cover, take the conservative path (skip the step, post nothing) and report it.
 - Work only inside your own worktree. The path is keyed on the branch, so no two agents share one. Never touch another worktree or the main clone.
 - `git worktree add` serializes on the main clone's lock. Retry once on a lock error.
-- Return: the target, worktree path, review file path, verdict, finding count of each category (blocking/should-fix/nit), the merge-readiness confidence with its one-line justification, and what you posted or skipped.
+- Return: the target, worktree path, review file path, verdict, the review's whole summary row (confidence, difficulty, blocking/should-fix/nit counts, and the one-line why), and what you posted or skipped.
 
 ## End: report the table
 
-One row per target — number or branch, title, confidence, verdict, count of findings of each category, posted or held, worktree path. **Sort by confidence, High first**, so the changes the user can merge on sight sit at the top and the ones needing real attention sit at the bottom. Carry each agent's one-line justification for the rating; trim it to a few words if the table gets wide.
+One row per target — number or branch, title, confidence, difficulty, findings as `B/S/N`, posted or held, worktree path. **Sort by difficulty ascending (Trivial, Low, Medium, High), then by confidence descending (High first)**, so the quickest merges sit at the top and the ones needing real work sit at the bottom. Carry each agent's one-line why; trim it to a few words if the table gets wide.
 
 Keep the dropped ones in the table so the batch accounts for everything the mode resolved to. Then ask once whether to clean up the worktrees with `git worktree remove <path>`.
