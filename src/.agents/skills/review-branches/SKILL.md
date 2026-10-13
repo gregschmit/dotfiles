@@ -58,6 +58,6 @@ Launch the agents in a single message so they run concurrently. Cap it around te
 
 ## End: report the table
 
-One row per target — number or branch, title, confidence, difficulty, findings as `B/S/N`, posted or held, worktree path. **Sort by difficulty ascending (Trivial, Low, Medium, High), then by confidence descending (High first)**, so the quickest merges sit at the top and the ones needing real work sit at the bottom. Carry each agent's one-line why; trim it to a few words if the table gets wide.
+One row per target — number or branch (link to the PR/MR if available), title, confidence, difficulty, findings as `B/S/N`, posted or held, worktree path. **Sort by confidence descending (High, Medium, Low), then by difficulty ascending (Trivial, Low, Medium, High)**, so the safest merges sit at the top, quickest first, and the ones needing real work sit at the bottom. Carry each agent's one-line why; trim it to a few words if the table gets wide.
 
 Keep the dropped ones in the table so the batch accounts for everything the mode resolved to. Then ask once whether to clean up the worktrees with `git worktree remove <path>`.
