@@ -39,12 +39,12 @@ List files primary changed since the branch point and files this branch touches.
 
 Invoke the `code-review` skill in `branch` mode against the current state. It writes `./CODE_REVIEW.md` (inside the worktree) and includes a suggested squash-merge commit message. Do not push that message or edit the PR/MR description yourself — it's for the human to copy into the squash box.
 
-## 6. Ask the user which path
+## 6. Choose: post the review or fix the findings
 
-Confirm before either — both are visible to other humans:
+Decide from the user's prompt — don't ask. Post the review by default. Fix the findings only when the user specifically asks for fixes, and leave the review in the worktree if they say not to post.
 
-- **Post the review** — only if a PR/MR exists. Top-level comment or review submission, whichever fits. Post the full code-review output as-is, preserving both `<details>` blocks (review and suggested commit message).
-  - **Optional add-on: inline suggested changes.** Only offer this when all of the following hold: PR/MR mode, the §3 merge-primary was requested, merged cleanly, and was pushed (otherwise inline anchors drift from the server-side head SHA and the API rejects the position). If the user asks for it, post each finding that maps to a single diff hunk as an inline suggestion — see `git-forge` for the gh/glab APIs. Skip findings that don't map cleanly.
+- **Post the review** — top-level comment or review submission, whichever fits. Post the full code-review output as-is, preserving both `<details>` blocks (review and suggested commit message). With no PR/MR there is nowhere to post, so leave the review in the worktree.
+  - **Inline suggested changes** — only when the user specifically asks; don't offer them. They need PR/MR mode and a §3 merge of primary that merged cleanly and was pushed (otherwise inline anchors drift from the server-side head SHA and the API rejects the position). If that didn't happen, say so and post the review without them. Post each finding that maps to a single diff hunk as an inline suggestion — see `git-forge` for the gh/glab APIs. Skip findings that don't map cleanly.
 - **Fix the findings** — work through Blocking and Should-fix items in the worktree, commit (confirm the message first), push, and if a PR/MR exists, post a short comment citing each finding's code to say what was addressed and what was intentionally left.
 
 ## End: report the worktree

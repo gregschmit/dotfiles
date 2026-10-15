@@ -54,6 +54,7 @@ Launch the agents in a single message so they run concurrently. Cap it around te
 - The §3 answers are the user's answers — never prompt. Anything they don't cover, take the conservative path (skip the step, post nothing) and report it.
 - Work only inside your own worktree. The path is keyed on the branch, so no two agents share one. Never touch another worktree or the main clone.
 - `git worktree add` serializes on the main clone's lock. Retry once on a lock error.
+- If this is a branch labeled `llm::pipeline-complete`, then if there are any blocking findings, the label should be removed and a new label `llm::ready-to-implement` should be added.
 - Return: the target, worktree path, review file path, verdict, the review's whole summary row (confidence, difficulty, blocking/should-fix/nit counts, and the one-line why), and what you posted or skipped.
 
 ## End: report the table

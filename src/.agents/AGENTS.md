@@ -7,8 +7,9 @@ Follow these software development guidelines when practical:
 - Favor composition over inheritance.
 - Write data-oriented code: think carefully about your data types.
 - In database migrations, most boolean and string columns should have a NOT NULL constraint and a default value (empty string for strings). This simplifies queries, and application logic usually treats blank strings and NULL the same way.
+- While adding migrations to feature branches is common during development, they should almost always be squashed into a single migration before merging into the target branch.
 - Lean on ASD-STE100 Simplified Technical English as a guide (not a strict rule — deviate when it reads better) and write with clarity, simplicity, brevity, and humanity (Zinsser). Don't use overly complex words or sentences.
-- Keep comments terse. Explain WHY, not WHAT — unless the code is genuinely hard to follow.
+- Keep comments terse. Explain WHY, not WHAT — unless the code is genuinely hard to comprehend.
 - Don't reference old behavior unless writing an upgrade/migration guide.
 - Commit messages: terse, 50/72 line length. Body is a short paragraph unless the commit warrants more. Use `fmt -w 72` to help you wrap lines properly, but note that it clobbers lists, which is why I prefer paragraphs.
 
@@ -31,7 +32,6 @@ Every comment an agent posts to GitHub or GitLab (top-level, review, inline sugg
 [content]
 ```
 
-- `[model]` — e.g. `Claude Opus 5.5 (1M)`. Emit what you know (ideally name, full version including minor/patch level, and context window); omit information you can't confirm rather than guess.
+- `[model]` — e.g. `Claude Opus 5.5 (1M)`. Emit what you know (ideally name, full version, and context window); omit information you can't confirm rather than guess.
 - `[effort]` — e.g. `high`, `fast`. Omit if unknown.
 - `[operation]` — the skill's short label including skill and action; e.g.: `review-branch summary`, `review-branch inline-suggestion`.
-- Segments joined by ` · ` (U+00B7 middle dot with a space on each side), never dashes or pipes.
