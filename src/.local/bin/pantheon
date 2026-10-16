@@ -1,0 +1,3064 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "textual>=8.2,<9",
+# ]
+#
+# [tool.uv]
+# exclude-newer = "2026-10-15T00:00:00Z"
+# ///
+
+# Formatted with ruff's default settings: uvx ruff format <this file>
+
+"""Pantheon runs a small team of AI coding agents in one terminal.
+
+Each agent is a real CLI (claude, codex, or gemini; claude can also run on an ollama
+model) with one role. A mode decides who works when. Pantheon shows the team in a
+chat-room feed, gives each agent a tab with a live copy of its screen, and lets you
+"transport" into an agent's own terminal when it needs you. Ctrl-] brings you back.
+
+  pantheon                          open the session switcher
+  pantheon start MODE [OPTIONS] [TASK]
+                                    start a session, e.g. `pantheon start implement 123`
+      -C, --dir DIR                 start in DIR (default: the current directory)
+      -a, --agent NAME=SPEC         change an agent, e.g. reviewer=gemini:pro
+      -y, --yolo                    start agents with permission checks off
+  pantheon session SLUG             open a session (a unique part of the slug is enough)
+  pantheon sessions [--prune DAYS]  list sessions; --prune deletes finished ones
+  pantheon show SLUG [NAME]         print a session's room, or one of its results
+  pantheon configure                detect agents again
+  pantheon help [COMMAND]
+
+SPEC is TOOL[:MODEL][@EFFORT], where TOOL is claude, codex, gemini, or ollama. TASK is
+free text, an issue number (123 or #123), or an issue URL.
+
+Agents keep your own setup: agent files, skills, MCP servers, and permission rules.
+Pantheon gives each step a short brief, and the agent writes its result to a file that
+ends with a "PANTHEON: <status>" line. Each session has a private tmux server, so agents
+keep running when pantheon exits. Claude and codex report through hooks; gemini reports
+through its window title.
+
+Files: ~/.local/state/pantheon (or $PANTHEON_HOME) holds config.toml and one sqlite file per
+session, sessions/<slug>.sqlite3. That file is the whole session: its record, its lock,
+the briefs, and the results. Agents read and write plain files, so while they run,
+pantheon also keeps their briefs and results in run/<slug>/, and copies each result into
+the session file.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import socket
+import sqlite3
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+
+from rich.text import Text
+from textual import work
+from textual.app import App, ComposeResult, SuspendNotSupported
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.content import Content
+from textual.screen import ModalScreen
+from textual.theme import BUILTIN_THEMES
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Collapsible,
+    ContentSwitcher,
+    Footer,
+    Input,
+    OptionList,
+    Select,
+    Static,
+    TabbedContent,
+    TabPane,
+)
+from textual.widgets.option_list import Option
+
+# The UI's colors; None keeps Textual's default. Agents wear their tools' brand colors
+# instead (TOOL_COLORS).
+THEME_PRIMARY = "#4ade80"
+THEME_ACCENT = "#22c55e"
+
+# ---------------------------------------------------------------------------------- roles
+
+# A role is a job. Keep these short: the agents' own files and skills do the rest.
+ROLES = {
+    "architect": (
+        "You are the architect. Study the task and the code, then write a design the "
+        "engineers can follow. Do not change the code."
+    ),
+    "engineer-implementor": "You are the implementing engineer. Build the design.",
+    "engineer-reviewer": (
+        "You are the reviewing engineer. Review the changes against the task and the "
+        "design. Do not change the code."
+    ),
+    "greeter": "You are a friendly greeter. Keep it to one or two sentences.",
+}
+
+# ---------------------------------------------------------------------------------- modes
+
+
+@dataclass(frozen=True)
+class Agent:
+    role: str
+    spec: str  # TOOL[:MODEL][@EFFORT]
+
+
+@dataclass(frozen=True)
+class Step:
+    agent: str
+    kind: str  # names the result: NN-<kind>[-<round>].md
+    round: int
+    body: str
+    write: str  # what the agent writes, e.g. "your design"
+    statuses: tuple[str, ...] = ("done",)
+
+
+@dataclass(frozen=True)
+class Finish:
+    state: str  # done, or waiting (for your decision)
+    note: str
+
+
+@dataclass(frozen=True)
+class Mode:
+    help: str
+    agents: dict[str, Agent]
+    flow: Callable[[Flow], Step | Finish]
+    approve: tuple[str, ...] = ()  # step kinds whose result waits for your OK
+    needs_task: bool = True
+    needs_git: bool = True
+    stop_when_done: bool = False
+    max_rounds: int = 5
+
+
+def flow_implement(f: Flow) -> Step | Finish:
+    last = f.last()
+    if last is None:
+        return Step("architect", "design", 0, f.intro("architect"), "your design")
+    if last.agent == "architect":
+        body = f.intro("implementor") + f"\n\nThe architect's design is in {last.path}."
+        return Step(
+            "implementor",
+            "impl",
+            1,
+            body,
+            "a short summary of your changes and where they are",
+        )
+    if last.agent == "implementor":
+        design = f.latest("architect").path
+        if f.first_turn("reviewer"):
+            body = f.intro("reviewer") + "\n\n"
+        else:
+            body = f"Round {last.round}. The implementor addressed your review. "
+        body += (
+            f"The design is in {design}. The implementor's summary, which says where the "
+            f"changes are, is in {last.path}. The work started from commit {f.base}. Review "
+            "every change, including uncommitted and untracked files."
+        )
+        if f.pre_existing:
+            body += (
+                " These files had changes before the session started, so they are not part "
+                "of this work: " + ", ".join(f.pre_existing)
+            )
+        return Step(
+            "reviewer",
+            "review",
+            last.round,
+            body,
+            "your review",
+            ("approved", "changes"),
+        )
+    if last.status == "approved":
+        return Finish("done", f"The reviewer approved round {last.round}.")
+    if last.round >= f.max_rounds:
+        return Finish("waiting", f"No approval after {last.round} rounds.")
+    body = (
+        f"Round {last.round + 1}. The reviewer asked for changes. The review is in "
+        f"{last.path}. Address it."
+    )
+    return Step(
+        "implementor",
+        "impl",
+        last.round + 1,
+        body,
+        "a short summary of your changes and where they are",
+    )
+
+
+def flow_hello(f: Flow) -> Step | Finish:
+    last = f.last()
+    if last is None:
+        body = f.intro("alpha") + (
+            "\n\nSay hello to beta, the other agent, and say which tool and model you are."
+        )
+        return Step("alpha", "hello", 0, body, "your hello")
+    if last.agent == "alpha":
+        body = f.intro("beta") + (
+            f"\n\nAgent alpha said hello in {last.path}. Read it, then say hello back and "
+            "say which tool and model you are."
+        )
+        return Step("beta", "hello", 0, body, "your reply")
+    return Finish("done", "Both agents said hello.")
+
+
+MODES = {
+    "implement": Mode(
+        help="design, implement, and review a change until the reviewer approves",
+        agents={
+            "architect": Agent("architect", "claude@xhigh"),
+            "implementor": Agent("engineer-implementor", "codex@xhigh"),
+            "reviewer": Agent("engineer-reviewer", "claude@xhigh"),
+        },
+        flow=flow_implement,
+        approve=(),  # e.g. ("design",) to OK the design before the engineers start
+    ),
+    "hello": Mode(
+        help="two agents say hello (a quick test)",
+        agents={
+            "alpha": Agent("greeter", "claude:haiku@low"),
+            "beta": Agent("greeter", "codex@low"),
+        },
+        flow=flow_hello,
+        needs_task=False,
+        needs_git=False,
+        stop_when_done=True,
+    ),
+}
+
+# --------------------------------------------------------------------------------- schema
+
+SCHEMA_VERSION = 1
+
+SCHEMA = """
+CREATE TABLE session (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    slug TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT '',
+    task TEXT NOT NULL DEFAULT '',          -- the task text the agents get
+    source TEXT NOT NULL DEFAULT '',        -- the issue URL, when the task came from one
+    dir TEXT NOT NULL DEFAULT '',           -- where the agents start
+    base_commit TEXT NOT NULL DEFAULT '',
+    pre_existing TEXT NOT NULL DEFAULT '',  -- files with changes before the session, one per line
+    yolo INTEGER NOT NULL DEFAULT 0,
+    max_rounds INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL DEFAULT 'running',  -- running, needs_you, waiting, done, stopped, ended
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+CREATE TABLE lock (                         -- the pantheon that has this session open
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    pid INTEGER NOT NULL DEFAULT 0,
+    host TEXT NOT NULL DEFAULT '',
+    heartbeat REAL NOT NULL DEFAULT 0       -- unix time; a stale lock is free
+) STRICT;
+
+CREATE TABLE agents (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL DEFAULT '',
+    tool TEXT NOT NULL DEFAULT '',          -- claude, codex, gemini, or ollama
+    model TEXT NOT NULL DEFAULT '',
+    effort TEXT NOT NULL DEFAULT '',
+    native_id TEXT NOT NULL DEFAULT '',     -- the tool's own session id
+    state TEXT NOT NULL DEFAULT 'new',      -- new, starting, working, needs_you, idle, exited
+    reason TEXT NOT NULL DEFAULT '',        -- why it needs you
+    started_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+CREATE TABLE steps (
+    id INTEGER PRIMARY KEY,
+    agent_id INTEGER NOT NULL REFERENCES agents(id),
+    kind TEXT NOT NULL DEFAULT '',
+    round INTEGER NOT NULL DEFAULT 0,
+    name TEXT NOT NULL DEFAULT '',          -- the result's file name, e.g. 01-design.md
+    brief TEXT NOT NULL DEFAULT '',         -- what the agent was asked to do
+    result TEXT NOT NULL DEFAULT '',        -- what it wrote: the step's artifact
+    statuses TEXT NOT NULL DEFAULT '',      -- allowed statuses, space separated
+    status TEXT NOT NULL DEFAULT 'open',    -- open, or the status the result ends with
+    sent INTEGER NOT NULL DEFAULT 0,        -- the brief reached the agent
+    gate INTEGER NOT NULL DEFAULT 0,        -- the result waits for your OK
+    approved INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL DEFAULT '',
+    ended_at TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+CREATE TABLE hooks (                        -- raw hook events from claude and codex, until read
+    id INTEGER PRIMARY KEY,
+    agent TEXT NOT NULL DEFAULT '',
+    payload TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+CREATE TABLE events (                       -- the room, plus hook summaries (kind = hook)
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL DEFAULT '',
+    agent_id INTEGER REFERENCES agents(id), -- NULL: pantheon or you
+    kind TEXT NOT NULL DEFAULT '',          -- note, start, result, needs, approve, waiting, done, error, hook
+    text TEXT NOT NULL DEFAULT '',
+    data TEXT NOT NULL DEFAULT '{}'
+) STRICT;
+"""
+
+# ---------------------------------------------------------------------------------- tools
+
+TOOLS = ("claude", "codex", "gemini", "ollama")
+FALLBACK_ORDER = ("claude", "codex", "gemini")
+
+# Text that shows an agent's input box is on screen. Pantheon types only when it is.
+INPUT_MARKERS = {
+    "claude": "❯",
+    "codex": "›",
+    "gemini": "Type your message",
+    "ollama": "❯",
+}
+
+# Claude and codex hooks run this to add the hook's JSON to the session file.
+HOOK_PROGRAM = (
+    "import os, sqlite3, sys; "
+    'd = sys.stdin.buffer.read().decode("utf-8", "replace"); '
+    'c = sqlite3.connect(os.environ["PANTHEON_DB"], uri=True, timeout=10); '
+    'c.execute("INSERT INTO hooks (agent, payload) VALUES (?, ?)", '
+    '(os.environ["PANTHEON_AGENT"], d)); '
+    "c.commit()"
+)
+
+CLAUDE_HOOK_EVENTS = (
+    "SessionStart",
+    "UserPromptSubmit",
+    "PermissionRequest",
+    "PostToolBatch",
+    "Notification",
+    "Stop",
+    "StopFailure",
+    "SessionEnd",
+)
+CLAUDE_NEEDS_NOTICES = {
+    "permission_prompt",
+    "elicitation_dialog",
+    "elicitation_url_dialog",
+    "idle_prompt",
+    "agent_needs_input",
+}
+CODEX_HOOK_LABELS = {
+    "SessionStart": "session_start",
+    "UserPromptSubmit": "user_prompt_submit",
+    "PermissionRequest": "permission_request",
+    "PostToolUse": "post_tool_use",
+    "Stop": "stop",
+}
+GEMINI_WORKING = ("✦", "⏲")
+
+STARTUP_TIMEOUT = (
+    20  # seconds without a first signal: a startup dialog is likely waiting
+)
+QUIET_TIMEOUT = 60  # seconds without output while working (codex and gemini)
+LOCK_STALE = 30  # seconds without a heartbeat before a session lock counts as free
+
+TMUX_CONF = """\
+# Written by pantheon. Agents run in this private server; `tmux attach` is transport.
+set -g status off
+set -g prefix None
+set -g escape-time 0
+set -g focus-events on
+set -g extended-keys on
+set -g history-limit 10000
+set -g remain-on-exit on
+set -g mouse on
+set -g window-size latest
+set -as terminal-features ",*:RGB"
+bind -n C-] detach-client
+set-hook -g client-attached 'display-message -d 3000 "pantheon: Ctrl-] returns"'
+"""
+
+
+def hook_cmd() -> str:
+    # Silent, because hook output can reach the model, and never a failure, so a broken
+    # hook cannot get in an agent's way.
+    return f"{shlex.quote(sys.executable)} -I -c {shlex.quote(HOOK_PROGRAM)} 2>/dev/null || true"
+
+
+def claude_settings() -> dict:
+    hook = [{"type": "command", "command": hook_cmd(), "timeout": 10}]
+    hooks: dict = {event: [{"hooks": hook}] for event in CLAUDE_HOOK_EVENTS}
+    hooks["PreToolUse"] = [{"matcher": "AskUserQuestion|ExitPlanMode", "hooks": hook}]
+    # Agent view (the ← key on an empty prompt) would take over the agent's terminal.
+    return {"disableAgentView": True, "hooks": hooks}
+
+
+def codex_hook_args() -> list[str]:
+    # Codex runs -c hooks only when they are trusted. Passing their trust hashes too (the
+    # same hash as codex 0.158's hook_hash) avoids its review screen and writes nothing
+    # to ~/.codex.
+    cmd = hook_cmd()
+    args, state = [], []
+    for event, label in CODEX_HOOK_LABELS.items():
+        hook = '[{hooks=[{type="command",command=%s,timeout=10}]}]' % json.dumps(cmd)
+        args += ["-c", f"hooks.{event}={hook}"]
+        ident = {
+            "event_name": label,
+            "hooks": [
+                {"async": False, "command": cmd, "timeout": 10, "type": "command"}
+            ],
+        }
+        blob = json.dumps(
+            ident, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        digest = hashlib.sha256(blob.encode()).hexdigest()
+        key = json.dumps(f"/<session-flags>/config.toml:{label}:0:0")
+        state.append('%s={trusted_hash="sha256:%s"}' % (key, digest))
+    return args + ["-c", "hooks.state={" + ",".join(state) + "}"]
+
+
+def claude_fullscreen() -> bool:
+    home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    try:
+        return (
+            json.loads((home / "settings.json").read_text()).get("tui") == "fullscreen"
+        )
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def launch_claude(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]:
+    argv = [s.cfg["tools"]["claude"]["path"], "--session-id", a.native_id]
+    argv += ["--name", f"pantheon-{s.slug}-{a.name}", "--add-dir", s.scratch]
+    argv += ["--settings", json.dumps(claude_settings())]
+    if a.model:
+        argv += ["--model", a.model]
+    if a.effort:
+        # CLAUDE_CODE_EFFORT_LEVEL would beat --effort.
+        argv = ["env", "-u", "CLAUDE_CODE_EFFORT_LEVEL", *argv, "--effort", a.effort]
+    if s.yolo:
+        argv.append("--dangerously-skip-permissions")
+    env = {"DISABLE_AUTOUPDATER": "1"}
+    if claude_fullscreen():
+        # Otherwise a claude stopped in its first 10 s counts as a failed fullscreen start.
+        env["CLAUDE_CODE_NO_FLICKER"] = "1"
+    return [*argv, "--", first], env
+
+
+def launch_codex(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]:
+    argv = [s.cfg["tools"]["codex"]["path"], "--no-daemon", "-C", s.workdir]
+    argv += ["--add-dir", s.scratch, "-c", "check_for_update_on_startup=false"]
+    # An inline table: codex splits dotted -c keys on every dot, path dots included.
+    argv += ["-c", 'projects={%s={trust_level="trusted"}}' % json.dumps(s.workdir)]
+    argv += codex_hook_args()
+    if a.model:
+        argv += ["-m", a.model]
+    if a.effort:
+        argv += ["-c", f"model_reasoning_effort={json.dumps(a.effort)}"]
+    if s.yolo:
+        argv.append("--dangerously-bypass-approvals-and-sandbox")
+    return [*argv, "--", first], {}
+
+
+def launch_gemini(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]:
+    # Gemini 0.64 reads injected settings only from root-owned files, so it gets no hooks;
+    # pantheon follows its window title instead.
+    argv = [
+        s.cfg["tools"]["gemini"]["path"],
+        "--skip-trust",
+        "--session-id",
+        a.native_id,
+    ]
+    argv += ["--include-directories", s.scratch]
+    if a.model:
+        argv += ["-m", a.model]
+    if s.yolo:
+        argv += ["--approval-mode", "yolo"]
+    return [*argv, "-i", first], {}
+
+
+def launch_ollama(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]:
+    o = s.cfg["tools"]["ollama"]
+    model = a.model or o["model"]
+    argv, env = launch_claude(s, replace(a, model=model), first)
+    token_env = o.get("auth_env", "")
+    env.update(
+        {
+            "ANTHROPIC_BASE_URL": o["url"],
+            # Always set a token: without one, claude sends your claude.ai login to this host.
+            "ANTHROPIC_AUTH_TOKEN": (os.environ.get(token_env) if token_env else "")
+            or "ollama",
+            "ANTHROPIC_API_KEY": "",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": model,
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(o.get("context", 32768)),
+            "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
+        }
+    )
+    return argv, env
+
+
+LAUNCHERS = {
+    "claude": launch_claude,
+    "codex": launch_codex,
+    "gemini": launch_gemini,
+    "ollama": launch_ollama,
+}
+
+# ------------------------------------------------------------------------------- basics
+
+STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+HOME = Path(os.environ.get("PANTHEON_HOME") or STATE_HOME / "pantheon")
+CONFIG_PATH = HOME / "config.toml"
+SESSIONS = HOME / "sessions"
+RUN = HOME / "run"
+
+
+class PrepError(Exception):
+    """A new session cannot start; the message says why."""
+
+
+class Locked(Exception):
+    """Another pantheon has the session open."""
+
+
+class TmuxError(Exception):
+    pass
+
+
+def die(message: str) -> None:
+    raise SystemExit(f"pantheon: {message}")
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def stamp(iso: str) -> str:
+    try:
+        return datetime.fromisoformat(iso).astimezone().strftime("%H:%M")
+    except ValueError:
+        return "--:--"
+
+
+def age(iso: str) -> str:
+    try:
+        seconds = time.time() - datetime.fromisoformat(iso).timestamp()
+    except ValueError:
+        return "?"
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            return f"{int(seconds // size)}{unit}"
+    return "now"
+
+
+def shorten(text: str, width: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def first_line(text: str, width: int = 80) -> str:
+    return shorten(
+        next((line for line in text.splitlines() if line.strip()), ""), width
+    )
+
+
+def short_home(path: str) -> str:
+    home = str(Path.home())
+    return (
+        "~" + path[len(home) :] if path == home or path.startswith(home + "/") else path
+    )
+
+
+def read_text(path: str) -> str:
+    try:
+        return Path(path).read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def ensure_private_dir(path: Path) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(path)  # never follow a planted symlink
+    if not stat.S_ISDIR(st.st_mode):
+        die(f"{path} is not a directory; remove it")
+    if st.st_uid != os.getuid():
+        die(f"{path} belongs to another user; remove it or set PANTHEON_HOME")
+    if st.st_mode & 0o077:
+        os.chmod(path, 0o700)
+
+
+def write_private(path: Path, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")  # mode 0600
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def toml_dumps(data: dict) -> str:
+    """Write tables of str, bool, int, and list[str] (tomllib only reads)."""
+
+    def value(v) -> str:
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, int):
+            return str(v)
+        if isinstance(v, str):
+            # JSON strings are TOML basic strings, except that TOML also forbids a raw DEL.
+            return json.dumps(v, ensure_ascii=False).replace("\x7f", "\\u007f")
+        if isinstance(v, list) and all(isinstance(x, str) for x in v):
+            return "[" + ", ".join(value(x) for x in v) + "]"
+        raise TypeError(f"cannot write {type(v).__name__} to TOML")
+
+    def key(k: str) -> str:
+        return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k)
+
+    lines: list[str] = []
+
+    def table(prefix: str, d: dict) -> None:
+        scalars = [(k, v) for k, v in d.items() if not isinstance(v, dict)]
+        if prefix and scalars:
+            lines.extend(["", f"[{prefix}]"])
+        lines.extend(f"{key(k)} = {value(v)}" for k, v in scalars)
+        for k, v in d.items():
+            if isinstance(v, dict):
+                table(f"{prefix}.{key(k)}" if prefix else key(k), v)
+
+    table("", data)
+    text = "\n".join(lines).lstrip("\n") + "\n"
+    if tomllib.loads(text) != data:  # never write a file that reads back differently
+        raise ValueError("TOML round trip failed")
+    return text
+
+
+def read_jsonc(path: Path) -> dict:
+    """Read a JSON file that may have // and /* */ comments (gemini's settings)."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return {}
+    out, i, in_string = [], 0, False
+    while i < len(text):
+        c = text[i]
+        if in_string:
+            out.append(c)
+            if c == "\\":
+                out.append(text[i + 1 : i + 2])
+                i += 1
+            elif c == '"':
+                in_string = False
+        elif c == '"':
+            in_string = True
+            out.append(c)
+        elif text.startswith("//", i):
+            i = text.find("\n", i)
+            i = len(text) if i < 0 else i
+            continue
+        elif text.startswith("/*", i):
+            i = text.find("*/", i + 2)
+            i = len(text) if i < 0 else i + 2
+            continue
+        else:
+            out.append(c)
+        i += 1
+    try:
+        data = json.loads("".join(out))
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def clean_env() -> dict[str, str]:
+    """The environment agents start with: yours, minus what uv and a parent Claude add."""
+    env = dict(os.environ)
+    if sys.prefix != sys.base_prefix:  # running in uv's venv: keep agents out of it
+        venv_bin = os.path.realpath(os.path.join(sys.prefix, "bin"))
+        paths = env.get("PATH", "").split(os.pathsep)
+        env["PATH"] = os.pathsep.join(
+            p for p in paths if p and os.path.realpath(p) != venv_bin
+        )
+    for k in (
+        "VIRTUAL_ENV",
+        "UV",
+        "UV_RUN_RECURSION_DEPTH",
+        "CI",
+        "GITHUB_ACTIONS",
+        "TMUX",
+        "TMUX_PANE",
+    ):
+        env.pop(k, None)
+    for k in [k for k in env if k.startswith("TERM_PROGRAM")]:
+        del env[k]
+    if "CLAUDECODE" in env:  # pantheon itself runs inside Claude Code
+        for k in list(env):
+            claude = k.startswith(("CLAUDE_CODE_", "CLAUDE_AGENT_SDK"))
+            if claude or k in ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT"):
+                del env[k]
+    return env
+
+
+def run_cmd(
+    argv: list[str], cwd=None, timeout: float = 30, env=None
+) -> tuple[int, str, str]:
+    try:
+        p = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 127, "", str(e)
+    return p.returncode, p.stdout, p.stderr
+
+
+def git(workdir: str, *args: str) -> tuple[int, str, str]:
+    # Fail instead of waiting for a password behind the UI.
+    env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
+    }
+    return run_cmd(["git", "-C", workdir, *args], env=env)
+
+
+def ask(prompt: str, default: str = "") -> str:
+    try:
+        answer = input(prompt).strip()
+    except EOFError:
+        answer = ""
+    return answer or default
+
+
+# ------------------------------------------------------------------------------ discovery
+
+
+def load_config() -> dict | None:
+    try:
+        return tomllib.loads(CONFIG_PATH.read_text())
+    except FileNotFoundError:
+        return None
+    except tomllib.TOMLDecodeError as e:
+        die(f"{CONFIG_PATH} is not valid TOML ({e}); run pantheon configure")
+        return None
+
+
+def detect_tmux() -> dict:
+    path = shutil.which("tmux")
+    if not path:
+        die("tmux is required (brew install tmux)")
+    rc, out, _ = run_cmd([path, "-V"])
+    m = re.search(r"(\d+)\.(\d+)", out)
+    if rc or not m or (int(m[1]), int(m[2])) < (3, 2):
+        die(f"tmux 3.2 or later is required (found: {out.strip() or 'unknown'})")
+    return {"path": path, "version": out.split()[-1]}
+
+
+def detect_claude() -> dict:
+    path = shutil.which("claude")
+    if not path:
+        return {"enabled": False, "note": "not installed"}
+    # Never give claude a positional argument here: without a TTY it sends it as a prompt.
+    rc, out, _ = run_cmd([path, "--version"], env=clean_env())
+    version = out.split()[0] if rc == 0 and out.split() else ""
+    rc, out, _ = run_cmd([path, "auth", "status"], env=clean_env())
+    try:
+        auth = json.loads(out).get("authMethod", "")
+    except (ValueError, AttributeError):
+        auth = ""
+    note = "" if rc == 0 else "not logged in (claude auth login)"
+    return {
+        "enabled": rc == 0,
+        "path": path,
+        "version": version,
+        "auth": auth,
+        "note": note,
+    }
+
+
+def detect_codex() -> dict:
+    path = shutil.which("codex")
+    if not path:
+        return {"enabled": False, "note": "not installed"}
+    rc, out, _ = run_cmd([path, "--version"])
+    version = out.split()[-1] if rc == 0 and out.split() else ""
+    rc, out, err = run_cmd([path, "login", "status"])
+    text = (err.strip() or out.strip()).splitlines()
+    m = re.match(r"Logged in using (?:an? )?(.+?)(?: -|$)", text[0] if text else "")
+    auth = m.group(1).lower() if m else ""  # never keep the masked key that may follow
+    note = "" if rc == 0 else "not logged in (codex login)"
+    return {
+        "enabled": rc == 0,
+        "path": path,
+        "version": version,
+        "auth": auth,
+        "note": note,
+    }
+
+
+def gemini_auth(home: Path) -> tuple[str, bool]:
+    settings = read_jsonc(home / "settings.json")
+    auth = ((settings.get("security") or {}).get("auth") or {}).get("selectedType", "")
+    if not auth:
+        if os.environ.get("GOOGLE_GENAI_USE_GCA") == "true":
+            auth = "oauth-personal"
+        elif os.environ.get("GOOGLE_GENAI_USE_VERTEXAI") == "true":
+            auth = "vertex-ai"
+        elif os.environ.get("GEMINI_API_KEY"):
+            auth = "gemini-api-key"
+    if auth == "oauth-personal":
+        encrypted = os.environ.get("GEMINI_FORCE_ENCRYPTED_FILE_STORAGE") == "true"
+        return auth, encrypted or (home / "oauth_creds.json").exists()
+    if auth == "gemini-api-key":
+        return auth, bool(os.environ.get("GEMINI_API_KEY"))
+    if auth == "vertex-ai":
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT") and os.environ.get(
+            "GOOGLE_CLOUD_LOCATION"
+        )
+        return auth, bool(os.environ.get("GOOGLE_API_KEY") or project)
+    return auth, auth in ("compute-default-credentials", "gateway", "cloud-shell")
+
+
+def detect_gemini() -> dict:
+    path = shutil.which("gemini")
+    if not path:
+        return {"enabled": False, "note": "not installed"}
+    # Every gemini run registers its cwd as a gemini project, so run it from pantheon's dir.
+    rc, out, _ = run_cmd([path, "--version"], cwd=HOME, env=clean_env(), timeout=60)
+    version = out.strip().splitlines()[-1] if rc == 0 and out.strip() else ""
+    home = Path(os.environ.get("GEMINI_CLI_HOME") or Path.home()) / ".gemini"
+    auth, ok = gemini_auth(home)
+    note = "" if ok else "not signed in (run gemini once)"
+    ui = read_jsonc(home / "settings.json").get("ui") or {}
+    if ok and ui.get("dynamicWindowTitle") is False:
+        ok, note = False, "ui.dynamicWindowTitle is off, so pantheon cannot follow it"
+    return {"enabled": ok, "path": path, "version": version, "auth": auth, "note": note}
+
+
+def ollama_get(url: str, path: str, timeout: float = 3.0):
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + path, timeout=timeout) as r:
+            return json.loads(r.read() or b"null")
+    except (OSError, ValueError, urllib.error.URLError):
+        return None
+
+
+def ollama_url(text: str) -> str:
+    text = text.strip().rstrip("/")
+    if "://" in text:
+        return text
+    host = text or "127.0.0.1"
+    return f"http://{host}" if re.search(r":\d+$", host) else f"http://{host}:11434"
+
+
+def detect_ollama(interactive: bool, claude: dict) -> dict:
+    local = ollama_url(os.environ.get("OLLAMA_HOST", "")).replace(
+        "0.0.0.0", "127.0.0.1"
+    )
+    if not shutil.which("ollama") and ollama_get(local, "/api/version") is None:
+        return {"enabled": False, "note": "not found"}
+    if not interactive:
+        return {"enabled": False, "note": "found; run pantheon configure to use it"}
+    if not claude["enabled"]:
+        return {"enabled": False, "note": "found, but ollama agents run through claude"}
+    if not ask("Ollama found. Use an ollama agent? [y/N] ").lower().startswith("y"):
+        return {"enabled": False, "note": "not used"}
+    where = ask(f"Local ({local}) or remote? [L/r] ", "l").lower()
+    url = local if not where.startswith("r") else ollama_url(ask("Ollama URL: "))
+    if ollama_get(url, "/api/version") is None:
+        print(f"  No ollama server answers at {url}.")
+        return {"enabled": False, "note": f"no server at {url}"}
+    tags = ollama_get(url, "/api/tags") or {}
+    models = [
+        m for m in tags.get("models", []) if "tools" in (m.get("capabilities") or [])
+    ]
+    if not models:
+        print(
+            "  No model there can use tools, which agent work needs. Pull one, then rerun."
+        )
+        return {"enabled": False, "note": "no model with tools"}
+    for i, m in enumerate(models, 1):
+        size = (m.get("details") or {}).get("parameter_size", "")
+        thinking = "thinking" if "thinking" in (m.get("capabilities") or []) else ""
+        print(f"  {i}. {m['name']}  {size}  {thinking}".rstrip())
+    choice = ask("Model number: ", "1")
+    index = (
+        int(choice) - 1 if choice.isdigit() and 0 < int(choice) <= len(models) else 0
+    )
+    name = models[index]["name"]
+    if re.match(r"(llama3|mistral|qwen2\.5|codellama|starcoder)", name):
+        print(
+            f"  Note: {name} often fails at agent work; a newer coding model works better."
+        )
+    loaded = (ollama_get(url, "/api/ps") or {}).get("models", [])
+    context = next(
+        (m.get("context_length", 0) for m in loaded if m.get("name") == name), 0
+    )
+    if not context:
+        answer = ask("Context size the server uses for it [32768]: ", "32768")
+        context = int(answer) if answer.isdigit() else 32768
+    if context < 65536:
+        print(
+            "  Note: agents work better with a 64K context or more (an ollama server setting)."
+        )
+    return {"enabled": True, "url": url, "model": name, "context": int(context)}
+
+
+def agent_file_warnings(tools: dict) -> list[str]:
+    shared = Path.home() / ".agents" / "AGENTS.md"
+    files = {
+        "claude": Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+        / "CLAUDE.md",
+        "codex": Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        / "AGENTS.md",
+        "gemini": Path(os.environ.get("GEMINI_CLI_HOME") or Path.home())
+        / ".gemini"
+        / "GEMINI.md",
+    }
+    out = []
+    for tool, path in files.items():
+        if not tools[tool]["enabled"] or path.exists():
+            continue
+        hint = f" (for example: ln -s {shared} {path})" if shared.exists() else ""
+        out.append(f"{tool} cannot see a global agent file at {path}{hint}")
+    return out
+
+
+def configure(interactive: bool) -> dict:
+    print("pantheon: detecting agents...")
+    tmux = detect_tmux()
+    tools = {
+        "claude": detect_claude(),
+        "codex": detect_codex(),
+        "gemini": detect_gemini(),
+    }
+    tools["ollama"] = detect_ollama(interactive, tools["claude"])
+    cfg = {"version": 1, "configured_at": now_iso(), "tmux": tmux, "tools": tools}
+    write_private(CONFIG_PATH, "# Written by pantheon configure.\n" + toml_dumps(cfg))
+    for name, t in tools.items():
+        mark = "on " if t["enabled"] else "off"
+        detail = t.get("version", "") or t.get("model", "")
+        print(f"  {mark} {name:<7} {detail:<10} {t.get('note', '')}".rstrip())
+    print(f"  tmux {tmux['version']}")
+    for warning in agent_file_warnings(tools):
+        print(f"  ! {warning}")
+    print(f"pantheon: wrote {CONFIG_PATH}")
+    return cfg
+
+
+# ---------------------------------------------------------------------------------- store
+
+
+def db_path(slug: str) -> Path:
+    return SESSIONS / f"{slug}.sqlite3"
+
+
+def scratch_dir(slug: str) -> Path:
+    return RUN / slug
+
+
+def db_uri(path: Path, create: bool = False) -> str:
+    return f"file:{urllib.parse.quote(os.path.realpath(path))}?mode={'rwc' if create else 'rw'}"
+
+
+def connect(path: Path, create: bool = False) -> sqlite3.Connection:
+    # isolation_level=None: autocommit, so no read transaction stays open between polls.
+    # The default rollback journal keeps a closed session in this one file.
+    db = sqlite3.connect(
+        db_uri(path, create), uri=True, timeout=10.0, isolation_level=None
+    )
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys = ON")
+    return db
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def lock_holder(db: sqlite3.Connection) -> int:
+    """The pid of another live pantheon that has this session open, or 0."""
+    row = db.execute("SELECT pid, host, heartbeat FROM lock WHERE id = 1").fetchone()
+    if row is None or not row["pid"] or row["pid"] == os.getpid():
+        return 0
+    if (
+        row["host"] != socket.gethostname()
+    ):  # a session file copied from another machine
+        return 0
+    if time.time() - row["heartbeat"] > LOCK_STALE or not pid_alive(row["pid"]):
+        return 0
+    return row["pid"]
+
+
+def take_lock(db: sqlite3.Connection, slug: str) -> None:
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        holder = lock_holder(db)
+        if holder:
+            raise Locked(f"{slug} is open in another pantheon (pid {holder})")
+        db.execute(
+            "INSERT OR REPLACE INTO lock (id, pid, host, heartbeat) VALUES (1, ?, ?, ?)",
+            (os.getpid(), socket.gethostname(), time.time()),
+        )
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+    db.execute("COMMIT")
+
+
+def session_holder(slug: str) -> int:
+    try:
+        db = connect(db_path(slug))
+    except sqlite3.Error:
+        return 0
+    try:
+        return lock_holder(db)
+    finally:
+        db.close()
+
+
+def make_slug(words: str) -> str:
+    stem = re.sub(r"[^a-z0-9]+", "-", words.lower()).strip("-")
+    base = datetime.now().strftime("%Y%m%d") + (f"-{stem}" if stem else "")
+    if len(base) > 40:  # keeps tmux and file names short
+        base = base[:40].rsplit("-", 1)[0]
+    slug, n = base, 2
+    while db_path(slug).exists() or scratch_dir(slug).exists():
+        slug, n = f"{base}-{n}", n + 1
+    return slug
+
+
+def list_sessions() -> list[dict]:
+    out = []
+    for path in SESSIONS.glob("*.sqlite3"):
+        try:
+            db = connect(path)
+            row = db.execute("SELECT * FROM session").fetchone()
+            holder = lock_holder(db)
+            db.close()
+        except sqlite3.Error:
+            continue
+        if row is not None:
+            out.append({**dict(row), "slug": path.stem, "holder": holder})
+    return sorted(out, key=lambda s: s["created_at"], reverse=True)
+
+
+def resolve_slug(text: str) -> str:
+    slugs = [p.stem for p in SESSIONS.glob("*.sqlite3")]
+    if text in slugs:
+        return text
+    hits = sorted(s for s in slugs if text in s)
+    if not hits:
+        die(f"no session matches {text!r}")
+    if len(hits) > 1:
+        die(f"{text!r} matches several sessions: {', '.join(hits)}")
+    return hits[0]
+
+
+def parse_spec(spec: str) -> tuple[str, str, str]:
+    rest, _, effort = spec.partition("@")
+    tool, _, model = rest.partition(":")
+    if tool not in TOOLS:
+        raise PrepError(
+            f"unknown tool {tool!r} in {spec!r}; use one of {', '.join(TOOLS)}"
+        )
+    return tool, model, effort
+
+
+def agent_key(mode: Mode, name: str) -> str | None:
+    if name in mode.agents:
+        return name
+    for key, agent in mode.agents.items():
+        if name == agent.role or agent.role.endswith("-" + name):
+            return key
+    return None
+
+
+def resolve_agents(
+    cfg: dict, mode: Mode, overrides: list[str]
+) -> tuple[dict, list[str]]:
+    specs = {name: agent.spec for name, agent in mode.agents.items()}
+    explicit = set()
+    for item in overrides:
+        name, sep, spec = item.partition("=")
+        key = agent_key(mode, name.strip())
+        if not sep or key is None:
+            raise PrepError(
+                f"bad --agent {item!r}; this mode's agents: {', '.join(mode.agents)}"
+            )
+        specs[key] = spec.strip()
+        explicit.add(key)
+    enabled = [t for t in TOOLS if (cfg["tools"].get(t) or {}).get("enabled")]
+    agents, notes = {}, []
+    for name, spec in specs.items():
+        tool, model, effort = parse_spec(spec)
+        if tool not in enabled:
+            if name in explicit:
+                raise PrepError(f"{tool} is not set up (run pantheon configure)")
+            fallback = next((t for t in FALLBACK_ORDER if t in enabled), None)
+            if fallback is None:
+                raise PrepError("no agent tool is set up (run pantheon configure)")
+            notes.append(f"{name}: {tool} is not set up, so it runs on {fallback}")
+            tool, model = fallback, ""
+        if tool == "gemini" and effort:
+            notes.append(
+                f"{name}: gemini has no per-run effort setting, so @{effort} is ignored"
+            )
+            effort = ""
+        agents[name] = (mode.agents[name].role, tool, model, effort)
+    return agents, notes
+
+
+# --------------------------------------------------------------------------------- issues
+
+
+def parse_issue_ref(text: str) -> dict | None:
+    t = text.strip()
+    if m := re.fullmatch(r"#?(\d+)", t):
+        return {"number": int(m[1])}
+    if m := re.fullmatch(r"https?://github\.com/([^/\s]+/[^/\s]+)/issues/(\d+)/?", t):
+        return {"number": int(m[2]), "host": "github.com", "path": m[1]}
+    if m := re.fullmatch(
+        r"https?://(?:[^@/\s]+@)?([^/\s]+)/(.+?)/-/(?:issues|work_items)/(\d+)/?", t
+    ):
+        return {"number": int(m[3]), "host": m[1], "path": m[2]}
+    return None
+
+
+def parse_remote(url: str) -> tuple[str, str]:
+    url = url.strip()
+    if "://" not in url:  # scp-like: git@host:group/project.git
+        m = re.fullmatch(r"(?:[^@/\s]+@)?([^:/\s]+):(.+?)(?:\.git)?/?", url)
+        if m:
+            return m[1], m[2]
+    u = urllib.parse.urlsplit(url)  # drops the user part, which can hold a token
+    if u.hostname:
+        return u.hostname, u.path.strip("/").removesuffix(".git")
+    raise PrepError(
+        "cannot read the origin remote"
+    )  # never echo it: it can hold a token
+
+
+def forge_error(tool: str, rc: int, err: str) -> PrepError:
+    line = first_line(err, 200) or f"exit status {rc}"
+    if rc == 4 or re.search(r"401|403|auth|log ?in|token", err, re.I):
+        return PrepError(
+            f"{tool} could not sign in ({line}); fix its login and try again"
+        )
+    return PrepError(f"{tool}: {line}")
+
+
+def fetch_issue(workdir: str, ref: dict) -> dict:
+    host, path = ref.get("host", ""), ref.get("path", "")
+    if not host:
+        rc, out, _ = git(workdir, "remote", "get-url", "origin")
+        if rc:
+            raise PrepError("an issue number needs an origin remote")
+        host, path = parse_remote(out)
+    n = str(ref["number"])
+    if host == "github.com":
+        fields = "number,title,body,labels,comments,url,state"
+        rc, out, err = run_cmd(
+            ["gh", "issue", "view", n, "-R", path, "--json", fields], cwd=workdir
+        )
+        if rc:
+            raise forge_error("gh", rc, err)
+        data = json.loads(out)
+        if "/pull/" in data.get("url", ""):  # issues and pull requests share numbers
+            raise PrepError(f"#{n} is a pull request, not an issue")
+        comments = [
+            {
+                "author": (c.get("author") or {}).get("login", ""),
+                "at": c.get("createdAt", ""),
+                "body": c.get("body", ""),
+            }
+            for c in data.get("comments", [])
+        ]
+        return {
+            "title": data["title"],
+            "url": data["url"],
+            "body": data.get("body") or "",
+            "comments": comments,
+        }
+    repo = f"{host}/{path}"  # always name the host, or glab falls back to gitlab.com
+    rc, out, err = run_cmd(
+        ["glab", "issue", "view", n, "--output", "json", "--repo", repo], cwd=workdir
+    )
+    if rc:
+        raise forge_error("glab", rc, err)
+    data = json.loads(out)
+    notes_path = (
+        f"projects/:id/issues/{n}/notes?sort=asc&order_by=created_at&per_page=100"
+    )
+    rc, out, err = run_cmd(
+        ["glab", "api", "--repo", repo, "--paginate", "--output", "ndjson", notes_path],
+        cwd=workdir,
+    )
+    if rc:
+        raise forge_error("glab", rc, err)
+    comments = []
+    for line in out.splitlines():
+        note = json.loads(line) if line.strip() else {}
+        if note and not note.get("system"):
+            author = (note.get("author") or {}).get("username", "")
+            comments.append(
+                {
+                    "author": author,
+                    "at": note.get("created_at", ""),
+                    "body": note.get("body", ""),
+                }
+            )
+    body = data.get("description") or ""
+    return {
+        "title": data["title"],
+        "url": data.get("web_url", ""),
+        "body": body,
+        "comments": comments,
+    }
+
+
+def format_issue(issue: dict) -> str:
+    parts = [issue["title"], issue["url"], issue["body"].strip() or "(no description)"]
+    if issue["comments"]:
+        parts.append("Comments:")
+        for c in issue["comments"]:
+            parts.append(f"{c['author']} ({c['at'][:10]}):\n{c['body'].strip()}")
+    return "\n\n".join(parts)
+
+
+# ------------------------------------------------------------------------- new sessions
+
+
+@dataclass
+class NewSession:
+    mode: str
+    task: str  # as typed: text, an issue number, or an issue URL
+    dir: str
+    yolo: bool
+    agents: list[str] = field(default_factory=list)  # NAME=SPEC overrides
+
+
+def dirty_files(workdir: str) -> list[str]:
+    rc, out, _ = git(workdir, "status", "--porcelain")
+    return [line[3:] for line in out.splitlines() if line.strip()] if rc == 0 else []
+
+
+def prepare(
+    cfg: dict, req: NewSession, confirm: Callable[[list[str]], bool]
+) -> tuple[str, list[str]]:
+    """Check the start dir, read the task, pick the agents, and write the session file."""
+    mode = MODES[req.mode]
+    workdir = os.path.realpath(os.path.expanduser(req.dir or "."))
+    if not os.path.isdir(workdir):
+        raise PrepError(f"{req.dir} is not a directory")
+    base, pre_existing, notes = "", [], []
+    if mode.needs_git:
+        if git(workdir, "rev-parse", "--show-toplevel")[0]:
+            raise PrepError(f"{workdir} is not in a git repo")
+        rc, out, _ = git(workdir, "rev-parse", "HEAD")
+        if rc:
+            raise PrepError(f"{workdir} has no commits yet")
+        base = out.strip()
+        pre_existing = dirty_files(workdir)
+        if pre_existing and not confirm(pre_existing):
+            raise PrepError("stopped: the work tree has uncommitted changes")
+        busy = [
+            s["slug"]
+            for s in list_sessions()
+            if s["dir"] == workdir and s["state"] in ("running", "needs_you")
+        ]
+        if busy:
+            notes.append(
+                f"another running session starts in this dir too: {', '.join(busy)}"
+            )
+    task, source, title = req.task.strip(), "", req.task.strip()
+    ref = parse_issue_ref(task) if task else None
+    if ref:
+        issue = fetch_issue(workdir, ref)
+        task, source, title = format_issue(issue), issue["url"], issue["title"]
+    if mode.needs_task and not task:
+        raise PrepError(f"{req.mode} needs a task")
+    agents, agent_notes = resolve_agents(cfg, mode, req.agents)
+    notes += agent_notes
+    slug = make_slug(first_line(title, 60) if title else req.mode)
+    db = connect(db_path(slug), create=True)
+    try:
+        db.executescript(
+            f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+        )
+        now = now_iso()
+        db.execute(
+            "INSERT INTO session (id, slug, mode, task, source, dir, base_commit, pre_existing,"
+            " yolo, max_rounds, state, created_at, updated_at)"
+            " VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)",
+            (
+                slug,
+                req.mode,
+                task,
+                source,
+                workdir,
+                base,
+                "\n".join(pre_existing),
+                int(req.yolo),
+                mode.max_rounds,
+                now,
+                now,
+            ),
+        )
+        for name, (role, tool, model, effort) in agents.items():
+            db.execute(
+                "INSERT INTO agents (name, role, tool, model, effort, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (name, role, tool, model, effort, now),
+            )
+        opening = f"Started {req.mode} in {short_home(workdir)}" + (
+            f" at {base[:9]}" if base else ""
+        )
+        if source:
+            opening += f" for {source}"
+        for text in [opening + ".", *notes]:
+            db.execute(
+                "INSERT INTO events (at, kind, text) VALUES (?, 'note', ?)", (now, text)
+            )
+    finally:
+        db.close()
+    return slug, notes
+
+
+def git_summary(workdir: str, base: str) -> str:
+    _, diff, _ = git(workdir, "diff", "--stat", base)
+    _, status, _ = git(workdir, "status", "--short")
+    text = f"In {short_home(workdir)} since {base[:9]}:\n" + (
+        diff.strip() or "no changes to tracked files"
+    )
+    return text + (f"\n\n{status.rstrip()}" if status.strip() else "")
+
+
+# ---------------------------------------------------------------------------------- flows
+
+
+@dataclass
+class StepRecord:
+    agent: str
+    kind: str
+    round: int
+    status: str
+    path: str  # the result file, which the next agent reads
+    text: str
+
+
+class Flow:
+    """What a flow function sees: the session and its finished steps, oldest first."""
+
+    def __init__(self, mode, task, workdir, base, pre_existing, max_rounds, done):
+        self.mode, self.task, self.dir, self.base = mode, task, workdir, base
+        self.pre_existing, self.max_rounds, self.done = pre_existing, max_rounds, done
+
+    def last(self) -> StepRecord | None:
+        return self.done[-1] if self.done else None
+
+    def latest(self, agent: str) -> StepRecord | None:
+        return next((s for s in reversed(self.done) if s.agent == agent), None)
+
+    def first_turn(self, agent: str) -> bool:
+        return self.latest(agent) is None
+
+    def intro(self, agent: str) -> str:
+        # "Start in": a branch or worktree is the agent's call (and its skills').
+        parts = [ROLES[self.mode.agents[agent].role], f"Start in {self.dir}."]
+        if self.task:
+            parts.append("The task:\n\n" + self.task)
+        return "\n\n".join(parts)
+
+
+def render_brief(step: Step, result: str) -> str:
+    if len(step.statuses) == 1:
+        finish = f"End the file with this line:\n\nPANTHEON: {step.statuses[0]}"
+    else:
+        lines = "\n".join(f"PANTHEON: {s}" for s in step.statuses)
+        finish = f"End the file with one of these lines:\n\n{lines}"
+    return f"{step.body}\n\nWrite {step.write} to {result}. {finish}\n"
+
+
+STATUS_RE = re.compile(r"PANTHEON:\s*([A-Za-z]+)", re.I)
+
+
+def parse_status(text: str | None, name: str, allowed: list[str]) -> tuple[str, str]:
+    """The status a result ends with, or the problem with it."""
+    if text is None:
+        return "", f"ended its turn without writing {name}"
+    for line in reversed([line for line in text.splitlines() if line.strip()][-3:]):
+        m = STATUS_RE.search(line)
+        if m:
+            status = m.group(1).lower()
+            if status in allowed:
+                return status, ""
+            return (
+                "",
+                f"{name} ends with PANTHEON: {status}, not {' or '.join(allowed)}",
+            )
+    return "", f"{name} has no PANTHEON line at the end"
+
+
+# -------------------------------------------------------------------------------- runtime
+
+
+class Tmux:
+    """The private tmux server of one session."""
+
+    def __init__(self, path: str, name: str, conf: str, env: dict[str, str]):
+        self.base = [path, "-L", name, "-f", conf]
+        tmpdir = os.environ.get("TMUX_TMPDIR") or "/tmp"
+        self.socket = Path(tmpdir) / f"tmux-{os.getuid()}" / name
+        self.env = (
+            env  # the server takes its environment from the command that starts it
+        )
+
+    async def run(
+        self, *args: str, data: bytes | None = None, check: bool = True
+    ) -> str:
+        proc = await asyncio.create_subprocess_exec(
+            *self.base,
+            *args,
+            stdin=asyncio.subprocess.PIPE
+            if data is not None
+            else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self.env,
+        )
+        out, err = await proc.communicate(data)
+        if check and proc.returncode:
+            raise TmuxError(
+                err.decode(errors="replace").strip() or f"tmux {args[0]} failed"
+            )
+        return out.decode(errors="replace")
+
+    def run_sync(self, *args: str) -> str:
+        return run_cmd([*self.base, *args], env=self.env)[1]
+
+
+def pane(agent: str) -> str:
+    # "=name" matches a session name exactly; the ":" then picks its current pane.
+    return f"={agent}:"
+
+
+def tmux_name(slug: str) -> str:
+    digest = hashlib.sha1(os.path.realpath(db_path(slug)).encode()).hexdigest()[:6]
+    return f"pantheon-{slug}-{digest}"
+
+
+def signal_group(pid: int, sig: int) -> bool:
+    """Signal a pane's process group (gemini ignores hangups). False if it is gone."""
+    try:
+        os.killpg(pid, sig)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def stop_server_sync(cfg: dict, slug: str) -> None:
+    tmux = Tmux(cfg["tmux"]["path"], tmux_name(slug), os.devnull, clean_env())
+    pids = [
+        int(p)
+        for p in tmux.run_sync("list-panes", "-a", "-F", "#{pane_pid}").split()
+        if p.isdigit()
+    ]
+    for pid in pids:
+        signal_group(pid, signal.SIGTERM)
+    deadline = time.time() + 3
+    while time.time() < deadline and any(signal_group(p, 0) for p in pids):
+        time.sleep(0.1)
+    for pid in pids:
+        signal_group(pid, signal.SIGKILL)
+    tmux.run_sync("kill-server")
+    tmux.socket.unlink(missing_ok=True)
+
+
+@dataclass
+class AgentRun:
+    id: int
+    name: str
+    role: str
+    tool: str
+    model: str
+    effort: str
+    native_id: str
+    state: str
+    reason: str
+    launched: float = 0.0  # time.time() at launch, for the startup watchdog
+    activity: float = 0.0  # tmux #{window_activity}
+    title: str = ""
+    remindable: bool = (
+        False  # it ended a turn without its result; Remind may type to it
+    )
+    saw_work: bool = False  # gemini showed its working title since its last turn ended
+    last_message: str = ""
+    outbox: list = field(
+        default_factory=list
+    )  # (text, step id or None) to type when idle
+    waiting_since: float = 0.0
+    waiting_noted: bool = False
+
+
+def describe_tool(ev: dict) -> str:
+    name = ev.get("tool_name") or "a tool"
+    ti = ev.get("tool_input")
+    if isinstance(ti, dict):
+        for k in ("command", "file_path", "path", "url", "pattern"):
+            if isinstance(ti.get(k), str):
+                return f"{name}({shorten(ti[k], 80)})"
+    return name
+
+
+def describe_question(ev: dict) -> str:
+    if ev.get("tool_name") == "ExitPlanMode":
+        return "plan approval"
+    ti = ev.get("tool_input") or {}
+    questions = ti.get("questions") if isinstance(ti, dict) else None
+    if questions and isinstance(questions[0], dict):
+        return "question: " + shorten(str(questions[0].get("question", "")), 100)
+    return "a question"
+
+
+def compact_hook(ev: dict) -> dict:
+    keep = (
+        "session_id",
+        "tool_name",
+        "notification_type",
+        "message",
+        "error",
+        "source",
+        "model",
+    )
+    out = {k: ev[k] for k in keep if k in ev}
+    if isinstance(ev.get("last_assistant_message"), str):
+        out["last_assistant_message"] = ev["last_assistant_message"][:4000]
+    if "tool_input" in ev:
+        out["tool_input"] = shorten(json.dumps(ev["tool_input"]), 300)
+    return out
+
+
+class Session:
+    """One open session: its record, its tmux server, and its agents."""
+
+    def __init__(self, slug: str, cfg: dict, term_size: Callable[[], tuple[int, int]]):
+        self.slug, self.cfg, self.term_size = slug, cfg, term_size
+        self.db = connect(db_path(slug))
+        try:
+            version = self.db.execute("PRAGMA user_version").fetchone()[0]
+            if version != SCHEMA_VERSION:
+                raise ValueError(
+                    f"{slug} has schema version {version}; this pantheon reads {SCHEMA_VERSION}"
+                )
+            row = self.db.execute("SELECT * FROM session").fetchone()
+            if row["mode"] not in MODES:
+                raise ValueError(
+                    f"{slug} uses mode {row['mode']!r}, which this pantheon lacks"
+                )
+            take_lock(self.db, slug)
+        except BaseException:
+            self.db.close()
+            raise
+        self.mode_name, self.mode = row["mode"], MODES[row["mode"]]
+        self.task, self.workdir, self.base = row["task"], row["dir"], row["base_commit"]
+        self.pre_existing = [line for line in row["pre_existing"].splitlines() if line]
+        self.yolo, self.max_rounds, self.state = (
+            bool(row["yolo"]),
+            row["max_rounds"],
+            row["state"],
+        )
+        self.agents = {
+            r["name"]: AgentRun(
+                r["id"],
+                r["name"],
+                r["role"],
+                r["tool"],
+                r["model"],
+                r["effort"],
+                r["native_id"],
+                r["state"],
+                r["reason"],
+            )
+            for r in self.db.execute("SELECT * FROM agents ORDER BY id")
+        }
+        (scratch_dir(slug) / "briefs").mkdir(parents=True, exist_ok=True)
+        self.scratch = os.path.realpath(scratch_dir(slug))
+        self.materialize()
+        conf = os.path.join(self.scratch, "tmux.conf")
+        Path(conf).write_text(TMUX_CONF)
+        self.tmux = Tmux(cfg["tmux"]["path"], tmux_name(slug), conf, clean_env())
+        self.closed = False
+        self.driving = True  # false once another pantheon took the session over
+        self.checked_server = False
+        self.attached = ""  # the agent you are transported into
+        self.last_poll = self.last_beat = 0.0
+        self.errors = 0
+
+    # -- records
+
+    def event(
+        self,
+        kind: str,
+        text: str,
+        agent: AgentRun | None = None,
+        data: dict | None = None,
+    ):
+        self.db.execute(
+            "INSERT INTO events (at, agent_id, kind, text, data) VALUES (?, ?, ?, ?, ?)",
+            (
+                now_iso(),
+                agent.id if agent else None,
+                kind,
+                text,
+                json.dumps(data or {}),
+            ),
+        )
+
+    def save_agent(self, a: AgentRun, **fields) -> None:
+        for k, v in fields.items():
+            setattr(a, k, v)
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        self.db.execute(
+            f"UPDATE agents SET {sets} WHERE id = ?", (*fields.values(), a.id)
+        )
+
+    def set_session_state(self, state: str) -> None:
+        if state != self.state:
+            self.state = state
+            self.db.execute(
+                "UPDATE session SET state = ?, updated_at = ?", (state, now_iso())
+            )
+
+    def refresh_session_state(self) -> None:
+        if self.state not in ("running", "needs_you"):
+            return
+        needs = any(a.state == "needs_you" for a in self.agents.values())
+        self.set_session_state("needs_you" if needs else "running")
+
+    def set_state(self, a: AgentRun, state: str, reason: str = "") -> None:
+        if a.state == state and a.reason == reason:
+            return
+        self.save_agent(a, state=state, reason=reason)
+        if state != "needs_you":
+            a.remindable = False
+        self.refresh_session_state()
+
+    def needs_you(self, a: AgentRun, reason: str, remindable: bool = False) -> None:
+        if a.state == "needs_you" and a.reason == reason:
+            return
+        self.set_state(a, "needs_you", reason)
+        a.remindable = remindable
+        self.event("needs", reason, a, {"remind": remindable})
+
+    def agent_by_id(self, agent_id: int | None) -> AgentRun | None:
+        return next((a for a in self.agents.values() if a.id == agent_id), None)
+
+    def step(self, step_id: int):
+        return self.db.execute(
+            "SELECT * FROM steps WHERE id = ?", (step_id,)
+        ).fetchone()
+
+    def open_step(self, a: AgentRun | None = None):
+        if a is None:
+            return self.db.execute(
+                "SELECT * FROM steps WHERE status = 'open' ORDER BY id DESC"
+            ).fetchone()
+        return self.db.execute(
+            "SELECT * FROM steps WHERE status = 'open' AND agent_id = ?", (a.id,)
+        ).fetchone()
+
+    def result_path(self, step) -> str:
+        return os.path.join(self.scratch, step["name"])
+
+    def brief_path(self, step) -> str:
+        return os.path.join(self.scratch, "briefs", step["name"])
+
+    def materialize(self) -> None:
+        """Write the briefs and results agents read, when the scratch dir lacks them."""
+        for step in self.db.execute("SELECT * FROM steps"):
+            for path, text in (
+                (self.brief_path(step), step["brief"]),
+                (self.result_path(step), step["result"]),
+            ):
+                if text and not os.path.exists(path):
+                    Path(path).write_text(text)
+
+    def step_label(self) -> str:
+        step = self.open_step()
+        if step is None:
+            return ""
+        a = self.agent_by_id(step["agent_id"])
+        return f"{a.name if a else '?'}: {step['kind']}" + (
+            f" round {step['round']}" if step["round"] else ""
+        )
+
+    def live_agents(self) -> list[AgentRun]:
+        return [a for a in self.agents.values() if a.state not in ("new", "exited")]
+
+    # -- the loop
+
+    async def run(self) -> None:
+        while not self.closed and self.driving:
+            try:
+                await self.tick()
+                self.errors = 0
+            except Exception as e:  # keep the session going, and show what broke
+                self.errors += 1
+                if self.errors <= 3 and not self.closed:
+                    try:  # the traceback goes in the session file, with the rest of the record
+                        self.event(
+                            "error",
+                            f"pantheon: {type(e).__name__}: {e}",
+                            data={"traceback": traceback.format_exc()},
+                        )
+                    except sqlite3.Error:
+                        pass
+            await asyncio.sleep(0.25)
+
+    async def tick(self) -> None:
+        now = time.time()
+        if now - self.last_beat >= 5:
+            self.last_beat = now
+            self.heartbeat(now)
+            if not self.driving:
+                return
+        if not self.checked_server:
+            await self.check_server()
+        self.read_hooks()
+        if now - self.last_poll >= 0.5:
+            self.last_poll = now
+            await self.poll_panes()
+        self.watchdogs(now)
+        await self.send_pending(now)
+        await self.advance()
+
+    def heartbeat(self, now: float) -> None:
+        cur = self.db.execute(
+            "UPDATE lock SET heartbeat = ? WHERE id = 1 AND pid = ?", (now, os.getpid())
+        )
+        if cur.rowcount:
+            return
+        try:  # another pantheon took the lock while this one stalled
+            take_lock(self.db, self.slug)
+        except Locked as e:
+            self.driving = False
+            self.event("error", f"{e}, so this window stopped driving the session.")
+
+    async def check_server(self) -> None:
+        self.checked_server = True
+        live = self.live_agents()
+        if not live or await self.server_alive():
+            return
+        for a in live:
+            self.save_agent(a, state="exited", reason="")
+        if self.state not in ("done", "ended"):
+            self.set_session_state("stopped")
+            self.event(
+                "error",
+                "The agents are gone (their tmux server stopped), so this session cannot go on.",
+            )
+
+    async def server_alive(self) -> bool:
+        try:
+            await self.tmux.run("list-sessions")
+        except TmuxError:
+            return False
+        return True
+
+    # -- signals
+
+    def read_hooks(self) -> None:
+        rows = self.db.execute(
+            "SELECT id, agent, payload FROM hooks ORDER BY id LIMIT 500"
+        ).fetchall()
+        if not rows:
+            return
+        self.db.execute("DELETE FROM hooks WHERE id <= ?", (rows[-1]["id"],))
+        for row in rows:
+            a = self.agents.get(row["agent"])
+            try:
+                ev = json.loads(row["payload"])
+            except ValueError:
+                continue
+            if a is not None and isinstance(ev, dict):
+                self.on_hook(a, ev)
+
+    def on_hook(self, a: AgentRun, ev: dict) -> None:
+        name = ev.get("hook_event_name", "")
+        self.event("hook", name, a, compact_hook(ev))
+        if a.state == "exited":
+            return
+        if name == "SessionStart":
+            if a.tool == "codex" and ev.get("session_id") and not a.native_id:
+                self.save_agent(a, native_id=ev["session_id"])
+        elif name in ("UserPromptSubmit", "PostToolBatch", "PostToolUse"):
+            self.set_state(a, "working")
+        elif name == "PermissionRequest":
+            self.needs_you(a, "permission: " + describe_tool(ev))
+        elif name == "PreToolUse":  # AskUserQuestion or ExitPlanMode
+            self.needs_you(a, describe_question(ev))
+        elif name == "Notification":
+            # Claude also says this after Esc ends a turn, which fires no Stop.
+            if (
+                a.state == "working"
+                and ev.get("notification_type") in CLAUDE_NEEDS_NOTICES
+            ):
+                self.needs_you(a, ev.get("message") or "waiting for you")
+        elif name == "Stop":
+            if ev.get("background_tasks"):  # claude still has work running
+                return
+            a.last_message = ev.get("last_assistant_message") or ""
+            self.turn_ended(a)
+        elif name == "StopFailure":
+            self.needs_you(a, f"error: {ev.get('error', 'unknown')}")
+
+    def on_title(self, a: AgentRun, title: str) -> None:
+        glyph = title.strip()[:1]
+        if glyph in GEMINI_WORKING:
+            a.saw_work = True
+            self.set_state(a, "working")
+        elif glyph == "✋":
+            a.saw_work = True
+            self.needs_you(a, "action required")
+        elif glyph == "◇" and a.saw_work:  # gemini shows ◇ at startup too
+            a.saw_work = False
+            self.turn_ended(a)
+
+    def turn_ended(self, a: AgentRun) -> None:
+        step = self.open_step(a)
+        if step is None:  # a turn you started by transport
+            self.set_state(a, "idle")
+            if a.last_message:
+                self.event("note", "replied: " + first_line(a.last_message, 160), a)
+            return
+        path = self.result_path(step)
+        text = read_text(path) if os.path.exists(path) else None
+        status, problem = parse_status(text, step["name"], step["statuses"].split())
+        if problem:
+            self.needs_you(a, problem, remindable=True)
+            return
+        gate = int(step["kind"] in self.mode.approve)
+        self.db.execute(
+            "UPDATE steps SET status = ?, result = ?, gate = ?, ended_at = ? WHERE id = ?",
+            (status, text, gate, now_iso(), step["id"]),
+        )
+        self.set_state(a, "idle")
+        self.event("result", step["name"], a, {"step": step["id"], "status": status})
+        if gate:
+            self.set_session_state("waiting")
+            self.event(
+                "approve", f"{step['name']} waits for your OK.", a, {"step": step["id"]}
+            )
+
+    async def poll_panes(self) -> None:
+        if not self.live_agents():
+            return
+        fmt = "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{window_activity}\t#{pane_title}"
+        try:
+            out = await self.tmux.run("list-panes", "-a", "-F", fmt)
+        except TmuxError:
+            for a in self.live_agents():
+                self.exited(a, "")
+            return
+        for line in out.splitlines():
+            name, dead, status, activity, title = (line.split("\t", 4) + [""] * 5)[:5]
+            a = self.agents.get(name)
+            if a is None or a.state in ("new", "exited"):
+                continue
+            a.activity = float(activity) if activity.isdigit() else a.activity
+            if dead == "1":
+                self.exited(a, status)
+                continue
+            if a.tool == "gemini" and title != a.title:
+                self.on_title(a, title)
+            a.title = title
+
+    def exited(self, a: AgentRun, status: str) -> None:
+        self.save_agent(a, state="exited", reason="")
+        self.event("note", "exited" + (f" with status {status}" if status else ""), a)
+        if self.open_step(a) is not None and self.state in ("running", "needs_you"):
+            self.set_session_state("stopped")
+            self.event(
+                "error", f"{a.name} exited during its step, so the session stopped."
+            )
+        self.refresh_session_state()
+
+    def watchdogs(self, now: float) -> None:
+        for a in self.agents.values():
+            if (
+                a.state == "starting"
+                and a.launched
+                and now - a.launched > STARTUP_TIMEOUT
+            ):
+                self.needs_you(
+                    a, "no response since it started; a startup dialog may be waiting"
+                )
+            elif (
+                a.state == "working"
+                and a.tool in ("codex", "gemini")
+                and a.activity
+                and now - a.activity > QUIET_TIMEOUT
+            ):
+                self.needs_you(
+                    a, "no output for a minute; it may be stuck, or its turn failed"
+                )
+
+    # -- driving the agents
+
+    async def advance(self) -> None:
+        if self.state not in ("running", "needs_you"):
+            return
+        step = self.open_step()
+        if step is not None:
+            if not step["sent"]:
+                await self.dispatch(step)
+            return
+        if self.db.execute(
+            "SELECT 1 FROM steps WHERE gate = 1 AND approved = 0"
+        ).fetchone():
+            self.set_session_state("waiting")
+            return
+        nxt = self.mode.flow(self.flow_view())
+        if isinstance(nxt, Finish):
+            await self.finish(nxt)
+            return
+        await self.dispatch(self.create_step(nxt))
+
+    def flow_view(self) -> Flow:
+        rows = self.db.execute(
+            "SELECT s.*, a.name AS agent_name FROM steps s JOIN agents a ON a.id = s.agent_id"
+            " WHERE s.status != 'open' AND (s.gate = 0 OR s.approved = 1) ORDER BY s.id"
+        )
+        done = [
+            StepRecord(
+                r["agent_name"],
+                r["kind"],
+                r["round"],
+                r["status"],
+                self.result_path(r),
+                r["result"],
+            )
+            for r in rows
+        ]
+        return Flow(
+            self.mode,
+            self.task,
+            self.workdir,
+            self.base,
+            self.pre_existing,
+            self.max_rounds,
+            done,
+        )
+
+    def create_step(self, step: Step):
+        a = self.agents[step.agent]
+        cur = self.db.execute(
+            "INSERT INTO steps (agent_id, kind, round, statuses, started_at) VALUES (?, ?, ?, ?, ?)",
+            (a.id, step.kind, step.round, " ".join(step.statuses), now_iso()),
+        )
+        step_id = cur.lastrowid
+        name = (
+            f"{step_id:02d}-{step.kind}"
+            + (f"-{step.round}" if step.round else "")
+            + ".md"
+        )
+        brief = render_brief(step, os.path.join(self.scratch, name))
+        self.db.execute(
+            "UPDATE steps SET name = ?, brief = ? WHERE id = ?", (name, brief, step_id)
+        )
+        row = self.step(step_id)
+        Path(self.brief_path(row)).write_text(brief)
+        self.event(
+            "note",
+            f"started {step.kind}" + (f" round {step.round}" if step.round else ""),
+            a,
+        )
+        return row
+
+    async def dispatch(self, step) -> None:
+        a = self.agent_by_id(step["agent_id"])
+        pointer = f"Read {self.brief_path(step)} and do what it says."
+        if a is None or a.state == "exited":
+            self.set_session_state("stopped")
+            self.event(
+                "error", "The agent for the next step is gone, so the session stopped."
+            )
+            return
+        if a.state == "new":
+            self.db.execute("UPDATE steps SET sent = 1 WHERE id = ?", (step["id"],))
+            await self.launch(a, pointer)
+        elif all(sid != step["id"] for _, sid in a.outbox):
+            a.outbox.append((pointer, step["id"]))
+
+    async def launch(self, a: AgentRun, first: str) -> None:
+        if (
+            a.tool != "codex" and not a.native_id
+        ):  # codex picks its own; its hook reports it
+            self.save_agent(a, native_id=str(uuid.uuid4()))
+        argv, env = LAUNCHERS[a.tool](self, a, first)
+        env = {
+            "COLORTERM": "truecolor",
+            "PANTHEON_DB": db_uri(db_path(self.slug)),
+            "PANTHEON_AGENT": a.name,
+            **env,
+        }
+        cols, rows = self.term_size()
+        cmd = [
+            "new-session",
+            "-d",
+            "-s",
+            a.name,
+            "-x",
+            str(cols),
+            "-y",
+            str(rows),
+            "-c",
+            self.workdir,
+        ]
+        for k, v in env.items():
+            cmd += ["-e", f"{k}={v}"]
+        self.save_agent(a, state="starting", reason="", started_at=now_iso())
+        a.launched = time.time()
+        try:
+            await self.tmux.run(*cmd, *argv)
+        except TmuxError as e:
+            self.save_agent(a, state="exited")
+            self.set_session_state("stopped")
+            self.event("error", f"could not start {a.name}: {e}", a)
+            return
+        detail = " ".join(
+            x for x in (a.tool, a.model, a.effort and "@" + a.effort) if x
+        )
+        self.event("start", f"joined ({detail})", a)
+
+    async def send_pending(self, now: float) -> None:
+        for a in self.agents.values():
+            if not a.outbox or self.attached == a.name:
+                continue
+            if not (a.state == "idle" or (a.state == "needs_you" and a.remindable)):
+                continue
+            screen = await self.tmux.run(
+                "capture-pane", "-p", "-t", pane(a.name), check=False
+            )
+            if INPUT_MARKERS[a.tool] not in screen:
+                # Never press Enter on an unknown screen: some dialogs default to "No, exit".
+                a.waiting_since = a.waiting_since or now
+                if now - a.waiting_since > 15 and not a.waiting_noted:
+                    a.waiting_noted = True
+                    self.event(
+                        "note", "waiting for its input box to show before typing", a
+                    )
+                continue
+            a.waiting_since, a.waiting_noted = 0.0, False
+            text, step_id = a.outbox.pop(0)
+            buffer = f"pantheon-{a.name}"
+            await self.tmux.run("load-buffer", "-b", buffer, "-", data=text.encode())
+            await self.tmux.run(
+                "paste-buffer", "-p", "-r", "-d", "-b", buffer, "-t", pane(a.name)
+            )
+            await asyncio.sleep(
+                0.3
+            )  # codex reads an Enter right after a paste as a newline
+            await self.tmux.run("send-keys", "-t", pane(a.name), "Enter")
+            if step_id:
+                self.db.execute("UPDATE steps SET sent = 1 WHERE id = ?", (step_id,))
+            self.set_state(a, "working")
+
+    async def finish(self, fin: Finish) -> None:
+        self.set_session_state(fin.state)
+        text = fin.note
+        if self.mode.needs_git and self.base:
+            text += "\n\n" + git_summary(self.workdir, self.base)
+        self.event("done" if fin.state == "done" else "waiting", text)
+        if fin.state == "done" and self.mode.stop_when_done:
+            await self.stop_agents()
+            self.event("note", "Stopped the agents.")
+
+    # -- actions from the UI
+
+    def remind(self, a: AgentRun) -> None:
+        step = self.open_step(a)
+        if step is None or any(sid is None for _, sid in a.outbox):
+            return
+        text = f"Please finish {self.brief_path(step)}: write {self.result_path(step)} and end it with the PANTHEON line."
+        a.outbox.append((text, None))
+
+    def approve(self, step_id: int) -> None:
+        step = self.step(step_id)
+        if step is None or step["approved"]:
+            return
+        # You may have had the agent revise its result by transport, so read it again.
+        path = self.result_path(step)
+        text = read_text(path) if os.path.exists(path) else step["result"]
+        status, _ = parse_status(text, step["name"], step["statuses"].split())
+        self.db.execute(
+            "UPDATE steps SET approved = 1, result = ?, status = ? WHERE id = ?",
+            (text, status or step["status"], step_id),
+        )
+        self.event("note", f"You approved {step['name']}.")
+        if self.state == "waiting":
+            self.set_session_state("running")
+            self.refresh_session_state()
+
+    def another_round(self) -> None:
+        if self.state != "waiting":
+            return
+        self.max_rounds += 1
+        self.db.execute("UPDATE session SET max_rounds = ?", (self.max_rounds,))
+        self.set_session_state("running")
+        self.refresh_session_state()
+        self.event("note", f"One more round (up to {self.max_rounds}).")
+
+    async def fit(self, only: str = "") -> None:
+        cols, rows = self.term_size()
+        for a in self.live_agents():
+            if not only or a.name == only:
+                await self.tmux.run(
+                    "resize-window",
+                    "-t",
+                    pane(a.name),
+                    "-x",
+                    str(cols),
+                    "-y",
+                    str(rows),
+                    check=False,
+                )
+
+    async def stop_agents(self) -> None:
+        out = await self.tmux.run(
+            "list-panes", "-a", "-F", "#{pane_pid}\t#{pane_dead}", check=False
+        )
+        pids = [
+            int(p)
+            for p, _, dead in (line.partition("\t") for line in out.splitlines())
+            if p.isdigit() and dead != "1"
+        ]
+        for pid in pids:
+            signal_group(pid, signal.SIGTERM)
+        for _ in range(30):
+            if not any(signal_group(p, 0) for p in pids):
+                break
+            await asyncio.sleep(0.1)
+        for pid in pids:
+            signal_group(pid, signal.SIGKILL)
+        await self.tmux.run("kill-server", check=False)
+        self.tmux.socket.unlink(missing_ok=True)
+        for a in self.live_agents():
+            self.save_agent(a, state="exited", reason="")
+        shutil.rmtree(
+            self.scratch, ignore_errors=True
+        )  # the session file has every result
+
+    async def end(self) -> None:
+        await self.stop_agents()
+        self.set_session_state("ended")
+        self.event("note", "Ended the session and stopped its agents.")
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.db.execute("DELETE FROM lock WHERE id = 1 AND pid = ?", (os.getpid(),))
+        except sqlite3.Error:
+            pass
+        self.db.close()
+
+
+# ------------------------------------------------------------------------------------- ui
+
+# Agents wear their tool's brand color. Ollama has none, so each ollama agent gets one of
+# these, picked by its name so it stays put.
+TOOL_COLORS = {"claude": "#d97757", "codex": "#3b82f6", "gemini": "#a855f7"}
+OLLAMA_COLORS = ("#eab308", "#ef4444", "#22c55e")
+AGENT_BADGES = {
+    "new": "·",
+    "starting": "○",
+    "working": "●",
+    "needs_you": "⚑",
+    "idle": "✓",
+    "exited": "✗",
+}
+SESSION_BADGES = {
+    "running": "●",
+    "needs_you": "⚑",
+    "waiting": "⚑",
+    "done": "✓",
+    "stopped": "○",
+    "ended": "○",
+}
+
+
+def agent_color(a: AgentRun) -> str:
+    if a.tool == "ollama":
+        return OLLAMA_COLORS[
+            int(hashlib.sha1(a.name.encode()).hexdigest(), 16) % len(OLLAMA_COLORS)
+        ]
+    return TOOL_COLORS.get(a.tool, "white")
+
+
+def tab_label(a: AgentRun) -> Content:
+    return Content.assemble(
+        (f"{AGENT_BADGES.get(a.state, '?')} {a.name}", agent_color(a))
+    )
+
+
+class Mirror(Static):
+    """A live copy of an agent's screen. A short tab shows the screen's lower part."""
+
+    DEFAULT_CSS = "Mirror { height: 1fr; overflow: hidden hidden; }"
+
+    def set_screen(self, screen: str) -> None:
+        lines = screen.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        height = self.size.height
+        if height and len(lines) > height:
+            lines = lines[-height:]
+        self.update(Text.from_ansi("\n".join(lines), no_wrap=True, overflow="crop"))
+
+
+class AgentView(Vertical):
+    DEFAULT_CSS = """
+    AgentView { height: 1fr; }
+    AgentView > .head { height: 1; background: $boost; }
+    AgentView > .head > Static { width: 1fr; padding: 0 1; }
+    """
+
+    def __init__(self, session: Session, agent: str):
+        super().__init__()
+        self.session, self.agent = session, agent
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="head"):
+            yield Static(classes="info")
+            yield Button("Transport", compact=True, variant="primary")
+        yield Mirror()
+
+    def sync(self) -> None:
+        a = self.session.agents[self.agent]
+        parts = [
+            a.role,
+            a.tool,
+            a.model,
+            a.effort and "@" + a.effort,
+            a.state.replace("_", " "),
+        ]
+        line = " · ".join(p for p in parts if p) + (f": {a.reason}" if a.reason else "")
+        self.query_one(".info", Static).update(
+            Content.assemble((a.name, f"bold {agent_color(a)}"), " · ", line)
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.app.transport(self.session, self.agent)
+
+
+class ActionEntry(Horizontal):
+    """A room line with buttons, which go away once it is resolved."""
+
+    DEFAULT_CSS = """
+    ActionEntry { height: auto; background: $warning 20%; }
+    ActionEntry.-resolved { background: transparent; }
+    ActionEntry > Static { width: 1fr; }
+    ActionEntry > Button { margin-left: 1; }
+    """
+
+    def __init__(
+        self, line: Content, buttons: list[tuple[str, Callable[[], None]]], live: bool
+    ):
+        super().__init__(classes="" if live else "-resolved")
+        self.text, self.buttons = line, buttons if live else []
+
+    def compose(self) -> ComposeResult:
+        yield Static(self.text)
+        for i, (label, _) in enumerate(self.buttons):
+            yield Button(
+                label,
+                compact=True,
+                variant="primary" if i == 0 else "default",
+                name=str(i),
+            )
+
+    def resolve(self) -> None:
+        self.add_class("-resolved")
+        self.query(Button).remove()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.buttons[int(event.button.name or 0)][1]()
+
+
+class Room(VerticalScroll):
+    DEFAULT_CSS = """
+    Room { height: 1fr; padding: 0 1; }
+    Room > * { height: auto; }
+    Room > Collapsible { border-top: none; padding: 0; }
+    """
+
+    def on_mount(self) -> None:
+        self.anchor()  # follow new entries until you scroll up
+
+
+class SessionView(Vertical):
+    DEFAULT_CSS = """
+    SessionView { height: 1fr; }
+    SessionView > TabbedContent { height: 1fr; }
+    SessionView TabPane { padding: 0; height: 1fr; }
+    """
+
+    def __init__(self, session: Session, **kwargs):
+        super().__init__(**kwargs)
+        self.session = session
+        self.last_event = 0
+        self.tabs: set[str] = set()
+        self.needs: dict[str, ActionEntry] = {}  # agent -> its live "needs you" entry
+        self.gates: dict[int, ActionEntry] = {}  # step id -> its live approve entry
+
+    def compose(self) -> ComposeResult:
+        with TabbedContent():
+            with TabPane("Room", id="room"):
+                yield Room()
+
+    def active_agent(self) -> str | None:
+        active = self.query_one(TabbedContent).active
+        return active.removeprefix("agent-") if active.startswith("agent-") else None
+
+    def entry(self, row):
+        s = self.session
+        a = s.agent_by_id(row["agent_id"])
+        style = f"bold {agent_color(a)}" if a else "bold"
+        head = (
+            (stamp(row["at"]) + " ", "dim"),
+            (f"{a.name if a else 'pantheon':<12} ", style),
+        )
+        data = json.loads(row["data"] or "{}")
+        kind, text = row["kind"], row["text"]
+        if kind == "result":
+            step = s.step(data.get("step", 0))
+            body = step["result"] if step else ""
+            title = Content.assemble(
+                *head,
+                (f"{text} → {data.get('status', '')}", "bold"),
+                "  ",
+                (first_line(body, 70), "dim"),
+            )
+            return Collapsible(Static(Text(body)), title=title, collapsed=True)
+        if kind == "needs" and a is not None:
+            buttons = [("Transport", lambda: self.app.transport(s, a.name))]
+            if data.get("remind"):
+                buttons.append(("Remind", lambda: s.remind(a)))
+            old = self.needs.pop(a.name, None)
+            if old is not None:
+                old.resolve()
+            live = a.state == "needs_you"
+            entry = ActionEntry(
+                Content.assemble(*head, ("needs you: ", "bold"), text), buttons, live
+            )
+            if live:
+                self.needs[a.name] = entry
+            return entry
+        if kind == "approve" and a is not None:
+            step_id = data.get("step", 0)
+            step = s.step(step_id)
+            live = s.state == "waiting" and step is not None and not step["approved"]
+            buttons = [
+                ("Approve", lambda: s.approve(step_id)),
+                ("Transport", lambda: self.app.transport(s, a.name)),
+            ]
+            entry = ActionEntry(Content.assemble(*head, (text, "bold")), buttons, live)
+            if live:
+                self.gates[step_id] = entry
+            return entry
+        if kind == "waiting":
+            buttons = [("Another round", s.another_round)]
+            return ActionEntry(
+                Content.assemble(*head, (text, "bold")), buttons, s.state == "waiting"
+            )
+        styles = {"error": "red", "done": "bold green"}
+        return Static(Content.assemble(*head, (text, styles.get(kind, ""))))
+
+    async def sync(self) -> None:
+        s = self.session
+        tabs = self.query_one(TabbedContent)
+        for a in s.agents.values():
+            if a.state != "new" and a.name not in self.tabs:
+                self.tabs.add(a.name)
+                label = tab_label(a)
+                await tabs.add_pane(
+                    TabPane(label, AgentView(s, a.name), id=f"agent-{a.name}")
+                )
+            if a.name in self.tabs:
+                tab = tabs.get_tab(f"agent-{a.name}")
+                label = tab_label(a)
+                if (
+                    tab.label.plain != label.plain
+                ):  # relabel only on change: it animates
+                    tab.label = label
+                tab.set_class(a.state == "needs_you", "-needs")
+        rows = s.db.execute(
+            "SELECT * FROM events WHERE id > ? AND kind != 'hook' ORDER BY id LIMIT 200",
+            (self.last_event,),
+        ).fetchall()
+        room = self.query_one(Room)
+        for row in rows:
+            self.last_event = row["id"]
+            await room.mount(self.entry(row))
+        extra = len(room.children) - 500
+        if extra > 0:
+            await room.remove_children(room.children[:extra])
+        for name, entry in list(self.needs.items()):
+            if s.agents[name].state != "needs_you":
+                entry.resolve()
+                del self.needs[name]
+        for step_id, entry in list(self.gates.items()):
+            step = s.step(step_id)
+            if step is None or step["approved"]:
+                entry.resolve()
+                del self.gates[step_id]
+        for view in self.query(AgentView):
+            view.sync()
+
+
+class SwitcherScreen(ModalScreen):
+    DEFAULT_CSS = """
+    SwitcherScreen { align: center middle; }
+    SwitcherScreen > Vertical {
+        width: 110; max-width: 95%; height: auto; max-height: 85%;
+        border: thick $accent; background: $surface; padding: 0 1;
+    }
+    SwitcherScreen OptionList { height: auto; max-height: 24; }
+    """
+    BINDINGS = [Binding("escape", "close", "Close"), Binding("n", "new", "New session")]
+
+    def __init__(self, open_sessions: dict[str, Session]):
+        super().__init__()
+        self.open_sessions = open_sessions
+
+    def compose(self) -> ComposeResult:
+        options = []
+        for r in list_sessions():
+            here = self.open_sessions.get(r["slug"])
+            state = here.state if here else r["state"]
+            badge = SESSION_BADGES.get(state, "?")
+            if r["holder"] and not here:
+                badge, state = "⋯", f"open in pid {r['holder']}"
+            label = Text.assemble(
+                f"{badge} ",
+                (r["slug"], "bold"),
+                f"  {r['mode']}  {state.replace('_', ' ')}  ",
+                (first_line(r["task"], 50), "dim"),
+            )
+            options.append(
+                Option(label, id=r["slug"], disabled=bool(r["holder"]) and not here)
+            )
+        with Vertical():
+            yield Static(Text("Sessions", style="bold"))
+            yield OptionList(*options) if options else Static("No sessions yet.")
+            yield Static(Text("enter: open · n: new session · esc: close", style="dim"))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option_id)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def action_new(self) -> None:
+        self.dismiss("+new")
+
+
+class NewSessionScreen(ModalScreen):
+    DEFAULT_CSS = """
+    NewSessionScreen { align: center middle; }
+    NewSessionScreen > Vertical {
+        width: 90; max-width: 95%; height: auto;
+        border: thick $accent; background: $surface; padding: 0 1;
+    }
+    NewSessionScreen Horizontal { height: auto; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, yolo: bool):
+        super().__init__()
+        self.yolo = yolo
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(Text("New session", style="bold"))
+            yield Select(
+                [(name, name) for name in MODES],
+                value="implement",
+                allow_blank=False,
+                id="mode",
+            )
+            yield Input(
+                placeholder="Task: text, an issue number, or an issue URL", id="task"
+            )
+            yield Input(value=os.getcwd(), placeholder="Start dir", id="dir")
+            yield Checkbox(
+                "yolo: start agents with permission checks off", self.yolo, id="yolo"
+            )
+            with Horizontal():
+                yield Button("Start", variant="primary", id="start")
+                yield Button("Cancel", id="cancel")
+
+    def submit(self) -> None:
+        self.dismiss(
+            NewSession(
+                mode=str(self.query_one("#mode", Select).value),
+                task=self.query_one("#task", Input).value.strip(),
+                dir=self.query_one("#dir", Input).value.strip(),
+                yolo=self.query_one("#yolo", Checkbox).value,
+            )
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "start":
+            self.submit()
+        else:
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.submit()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ConfirmScreen(ModalScreen):
+    DEFAULT_CSS = """
+    ConfirmScreen { align: center middle; }
+    ConfirmScreen > Vertical {
+        width: 70; max-width: 95%; height: auto;
+        border: thick $error; background: $surface; padding: 0 1;
+    }
+    ConfirmScreen Horizontal { height: auto; }
+    """
+    BINDINGS = [Binding("escape", "no", "No")]
+
+    def __init__(self, question: str):
+        super().__init__()
+        self.question = question
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(Content(self.question))
+            with Horizontal():
+                yield Button("Yes", variant="error", id="yes")
+                yield Button("No", id="no")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "yes")
+
+    def action_no(self) -> None:
+        self.dismiss(False)
+
+
+class PantheonApp(App):
+    TITLE = "pantheon"
+    CSS = """
+    #header { height: 1; background: $primary 30%; padding: 0 1; }
+    ContentSwitcher { height: 1fr; }
+    ContentTab.-needs { background: $warning 50%; text-style: bold; }
+    """
+    BINDINGS = [
+        Binding("left_square_bracket", "tab(-1)", "Prev tab"),
+        Binding("right_square_bracket", "tab(1)", "Next tab"),
+        Binding("ctrl+t", "transport", "Transport"),
+        Binding("ctrl+o", "sessions", "Sessions"),
+        Binding("ctrl+n", "new_session", "New"),
+        Binding("ctrl+e", "end_session", "End session"),
+        Binding("ctrl+q", "quit", "Quit", priority=True),
+    ]
+
+    def __init__(self, cfg: dict, slug: str | None, yolo: bool = False):
+        super().__init__()
+        self.cfg, self.first_slug, self.yolo = cfg, slug, yolo
+        self.sessions: dict[str, Session] = {}
+        self.current = ""
+        self.transporting: tuple[Session, str, bool] | None = (
+            None  # session, agent, came to answer
+        )
+        self.detach_at = 0.0
+        self.seen_needs: dict[str, int] = {}
+        self.capturing = False
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="header")
+        yield ContentSwitcher(id="views")
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        # get(): a THEME_ line that is commented out also means the default.
+        colors = {
+            "primary": globals().get("THEME_PRIMARY"),
+            "accent": globals().get("THEME_ACCENT"),
+        }
+        overrides = {k: v for k, v in colors.items() if v is not None}
+        self.register_theme(
+            replace(BUILTIN_THEMES["textual-dark"], name="pantheon", **overrides)
+        )
+        self.theme = "pantheon"
+        self.set_interval(0.25, self.refresh_ui)
+        self.set_interval(0.125, self.refresh_mirror)
+        if self.first_slug:
+            await self.open_session(self.first_slug)
+        else:
+            self.action_sessions()
+
+    def term_size(self) -> tuple[int, int]:
+        return max(self.size.width, 40), max(self.size.height, 10)
+
+    def current_view(self) -> SessionView | None:
+        if not self.current:
+            return None
+        return self.query_one(ContentSwitcher).get_child_by_id(
+            f"s-{self.current}", SessionView
+        )
+
+    async def open_session(self, slug: str) -> None:
+        if slug not in self.sessions:
+            try:
+                s = Session(slug, self.cfg, self.term_size)
+            except (Locked, ValueError, sqlite3.Error, OSError) as e:
+                self.notify(str(e), severity="error")
+                return
+            self.sessions[slug] = s
+            await self.query_one(ContentSwitcher).mount(SessionView(s, id=f"s-{slug}"))
+            self.run_worker(s.run(), group="engine", exit_on_error=False)
+        self.current = slug
+        self.query_one(ContentSwitcher).current = f"s-{slug}"
+
+    async def refresh_ui(self) -> None:
+        if self.transporting:
+            self.check_auto_return()
+            return
+        view = self.current_view()
+        if view is not None:
+            await view.sync()
+        s = self.sessions.get(self.current)
+        waiting = ("needs_you", "waiting")
+        others = sum(
+            1
+            for slug, x in self.sessions.items()
+            if slug != self.current and x.state in waiting
+        )
+        parts = ["pantheon"]
+        if s is not None:
+            parts += [s.slug, s.mode_name, s.state.replace("_", " "), s.step_label()]
+        header = " · ".join(p for p in parts if p) + (
+            f" · ⚑ {others} other" if others else ""
+        )
+        self.query_one("#header", Static).update(Content(header))
+        for slug, x in self.sessions.items():
+            n = sum(1 for a in x.agents.values() if a.state == "needs_you") + (
+                x.state == "waiting"
+            )
+            if slug != self.current and n > self.seen_needs.get(slug, 0):
+                self.notify(f"{slug} needs you (ctrl+o to switch)", severity="warning")
+            self.seen_needs[slug] = n
+
+    def check_auto_return(self) -> None:
+        s, name, came_to_answer = self.transporting
+        a = s.agents.get(name)
+        if not came_to_answer or a is None or a.state == "needs_you":
+            self.detach_at = 0.0
+            return
+        now = time.time()
+        if not self.detach_at:
+            self.detach_at = now + 2  # unless it asks again right away
+        elif now >= self.detach_at:
+            self.detach_at = 0.0
+            self.transporting = (s, name, False)
+            self.run_worker(
+                s.tmux.run("detach-client", "-s", f"={name}", check=False),
+                exit_on_error=False,
+            )
+
+    async def refresh_mirror(self) -> None:
+        if self.transporting or self.capturing:
+            return
+        view = self.current_view()
+        name = view.active_agent() if view else None
+        if view is None or name is None or view.session.agents[name].state == "new":
+            return
+        self.capturing = True
+        try:
+            screen = await view.session.tmux.run(
+                "capture-pane", "-p", "-e", "-t", pane(name)
+            )
+        except TmuxError:
+            return
+        finally:
+            self.capturing = False
+        view.query_one(f"#agent-{name}").query_one(Mirror).set_screen(screen)
+
+    def on_resize(self) -> None:
+        if not self.transporting:
+            for s in self.sessions.values():
+                self.run_worker(s.fit(), group="fit", exit_on_error=False)
+
+    def action_tab(self, step: int) -> None:
+        view = self.current_view()
+        if view is None:
+            return
+        tabs = view.query_one(TabbedContent)
+        ids = [pane.id for pane in tabs.query(TabPane)]
+        if ids:
+            i = ids.index(tabs.active) if tabs.active in ids else 0
+            tabs.active = ids[(i + step) % len(ids)]
+
+    def action_transport(self) -> None:
+        view = self.current_view()
+        if view is None:
+            self.notify("Open a session first (ctrl+o).")
+            return
+        s = view.session
+        name = view.active_agent() or next(
+            (a.name for a in s.agents.values() if a.state == "needs_you"), None
+        )
+        if name is None:
+            self.notify("Pick an agent tab first.")
+            return
+        self.transport(s, name)
+
+    @work(exclusive=True, group="transport", exit_on_error=False)
+    async def transport(self, s: Session, name: str) -> None:
+        a = s.agents.get(name)
+        if a is None or a.state in ("new", "exited"):
+            self.notify(f"{name} is not running.")
+            return
+        await s.fit(name)
+        self.transporting = (s, name, a.state == "needs_you")
+        self.detach_at = 0.0
+        s.attached = name
+        error: BaseException | None = None
+        try:
+            # batch_update keeps refreshes from piling up while Textual is suspended.
+            with self.batch_update(), self.suspend():
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *s.tmux.base, "attach-session", "-t", f"={name}", env=s.tmux.env
+                    )
+                    await proc.wait()
+                except (
+                    BaseException
+                ) as e:  # Textual never comes back if one crosses suspend()
+                    error = e
+        except SuspendNotSupported:
+            self.notify("This terminal cannot hand over to an agent.", severity="error")
+        finally:
+            self.transporting = None
+            s.attached = ""
+        await s.fit(name)
+        if isinstance(error, asyncio.CancelledError):
+            raise error
+        if error is not None:
+            self.notify(f"Transport failed: {error}", severity="error")
+
+    def action_sessions(self) -> None:
+        self.push_screen(SwitcherScreen(self.sessions), self.picked_session)
+
+    async def picked_session(self, choice: str | None) -> None:
+        if choice == "+new":
+            self.action_new_session()
+        elif choice:
+            await self.open_session(choice)
+
+    def action_new_session(self) -> None:
+        self.push_screen(NewSessionScreen(self.yolo), self.new_session)
+
+    def new_session(self, req: NewSession | None) -> None:
+        if req is not None:
+            self.create_session(req)
+
+    @work(exit_on_error=False)
+    async def create_session(self, req: NewSession) -> None:
+        self.notify(f"Starting {req.mode}...")
+        try:
+            # Pressing Start accepts a dirty work tree; the reviewer is told which files.
+            slug, _ = await asyncio.to_thread(
+                prepare, self.cfg, req, lambda files: True
+            )
+        except PrepError as e:
+            self.notify(str(e), severity="error")
+            return
+        await self.open_session(slug)
+
+    def action_end_session(self) -> None:
+        s = self.sessions.get(self.current)
+        if s is None or s.state == "ended":
+            self.notify("No open session to end.")
+            return
+        question = f"End {s.slug} and stop its agents? You can still read its room."
+        self.push_screen(
+            ConfirmScreen(question),
+            lambda yes: yes and self.run_worker(s.end(), exit_on_error=False),
+        )
+
+    def on_unmount(self) -> None:
+        for s in self.sessions.values():
+            s.close()
+
+
+def run_ui(cfg: dict, slug: str | None, yolo: bool = False) -> int:
+    app = PantheonApp(cfg, slug, yolo)
+    app.run()
+    for s in app.sessions.values():
+        if s.state not in ("stopped", "ended") and s.live_agents():
+            print(
+                f"pantheon: {s.slug} still has agents running; reopen it with: pantheon session {s.slug}"
+            )
+    return 0
+
+
+# ------------------------------------------------------------------------------------ cli
+
+
+def confirm_dirty(files: list[str]) -> bool:
+    print("pantheon: the work tree already has changes:")
+    for name in files[:20]:
+        print(f"  {name}")
+    if len(files) > 20:
+        print(f"  ... and {len(files) - 20} more")
+    print("The reviewer will be told these were there before the session.")
+    return sys.stdin.isatty() and ask("Continue? [y/N] ").lower().startswith("y")
+
+
+def cmd_sessions(cfg: dict, prune: int | None) -> None:
+    rows = list_sessions()
+    if prune is not None:
+        cutoff = time.time() - prune * 86400
+        for r in rows:
+            try:
+                created = datetime.fromisoformat(r["created_at"]).timestamp()
+            except ValueError:
+                continue
+            if (
+                r["holder"]
+                or r["state"] not in ("done", "stopped", "ended")
+                or created > cutoff
+            ):
+                continue
+            stop_server_sync(cfg, r["slug"])
+            shutil.rmtree(scratch_dir(r["slug"]), ignore_errors=True)
+            for suffix in ("", "-journal", "-wal", "-shm"):
+                Path(f"{db_path(r['slug'])}{suffix}").unlink(missing_ok=True)
+            print(f"deleted {r['slug']}")
+        rows = list_sessions()
+    if not rows:
+        print("No sessions yet. Start one with: pantheon start MODE TASK")
+        return
+    for r in rows:
+        state = r["state"].replace("_", " ") + (
+            f" (open in pid {r['holder']})" if r["holder"] else ""
+        )
+        task = first_line(r["task"], 50)
+        print(
+            f"{r['slug']:<42} {r['mode']:<10} {state:<26} {age(r['created_at']):>4}  {short_home(r['dir'])}  {task}"
+        )
+
+
+def cmd_show(slug: str, name: str) -> None:
+    db = connect(db_path(slug))
+    try:
+        s = db.execute("SELECT * FROM session").fetchone()
+        steps = db.execute(
+            "SELECT s.*, a.name AS agent FROM steps s JOIN agents a ON a.id = s.agent_id ORDER BY s.id"
+        ).fetchall()
+        if name:
+            done = [r for r in steps if r["result"]]
+            hits = [r for r in done if r["name"] in (name, f"{name}.md")] or [
+                r for r in done if name in r["name"]
+            ]
+            if len(hits) != 1:
+                names = ", ".join(r["name"] for r in done) or "none yet"
+                die(f"{name!r} matches {len(hits)} results; this session has: {names}")
+            sys.stdout.write(hits[0]["result"].rstrip("\n") + "\n")
+            return
+        events = db.execute(
+            "SELECT e.*, a.name AS agent FROM events e LEFT JOIN agents a ON a.id = e.agent_id"
+            " WHERE e.kind != 'hook' ORDER BY e.id"
+        ).fetchall()
+    finally:
+        db.close()
+    print(
+        f"{slug} · {s['mode']} · {s['state'].replace('_', ' ')} · {short_home(s['dir'])}"
+    )
+    if s["source"]:
+        print(s["source"])
+    if steps:
+        print("\nResults (pantheon show SLUG NAME prints one):")
+        for r in steps:
+            print(f"  {r['name']:<24} {r['agent']:<12} {r['status']}")
+    print("\nRoom:")
+    for e in events:
+        lines = e["text"].splitlines() or [""]
+        print(f"  {stamp(e['at'])} {e['agent'] or 'pantheon':<12} {lines[0]}")
+        for line in lines[1:]:
+            print(f"  {'':<18} {line}")
+
+
+def build_parser() -> tuple[argparse.ArgumentParser, dict]:
+    # -y works before or after the command; SUPPRESS keeps a subcommand from resetting it.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "-y",
+        "--yolo",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="start agents with permission checks off",
+    )
+    parser = argparse.ArgumentParser(
+        prog="pantheon",
+        parents=[common],
+        description="Run a small team of AI coding agents in one terminal.",
+        epilog="With no command, pantheon opens the session switcher.",
+    )
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND", title="commands")
+    subs = {}
+    subs["start"] = sub.add_parser(
+        "start",
+        parents=[common],
+        help="start a session",
+        description="Start a session in one of these modes.",
+    )
+    modes = subs["start"].add_subparsers(
+        dest="mode", metavar="MODE", title="modes", required=True
+    )
+    for name, mode in MODES.items():
+        p = modes.add_parser(
+            name, parents=[common], help=mode.help, description=mode.help
+        )
+        p.add_argument(
+            "-C", "--dir", default=".", metavar="DIR", help="start in DIR (default: .)"
+        )
+        defaults = ", ".join(f"{n}={a.spec}" for n, a in mode.agents.items())
+        p.add_argument(
+            "-a",
+            "--agent",
+            action="append",
+            default=[],
+            metavar="NAME=SPEC",
+            help=f"change an agent; SPEC is TOOL[:MODEL][@EFFORT] (defaults: {defaults})",
+        )
+        p.add_argument(
+            "task",
+            nargs="+" if mode.needs_task else "*",
+            metavar="TASK",
+            help="free text, an issue number (123, #123), or an issue URL",
+        )
+        subs[name] = p
+    modes.add_parser("help", help="show the modes, or one mode's options").add_argument(
+        "topic", nargs="?", choices=list(MODES), metavar="MODE"
+    )
+    subs["session"] = sub.add_parser("session", help="open a session")
+    subs["session"].add_argument(
+        "slug", metavar="SLUG", help="the session (a unique part is enough)"
+    )
+    subs["sessions"] = sub.add_parser("sessions", help="list sessions")
+    subs["sessions"].add_argument(
+        "--prune",
+        type=int,
+        metavar="DAYS",
+        help="delete finished sessions older than DAYS",
+    )
+    subs["show"] = sub.add_parser(
+        "show", help="print a session's room, or one of its results"
+    )
+    subs["show"].add_argument(
+        "slug", metavar="SLUG", help="the session (a unique part is enough)"
+    )
+    subs["show"].add_argument(
+        "name", nargs="?", default="", metavar="NAME", help="a result, e.g. design"
+    )
+    subs["configure"] = sub.add_parser(
+        "configure", help="detect agents again and rewrite config.toml"
+    )
+    subs["help"] = sub.add_parser("help", help="show help for a command")
+    subs["help"].add_argument(
+        "topic", nargs="?", metavar="COMMAND", help="a command or a mode"
+    )
+    return parser, subs
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser, subs = build_parser()
+    args = parser.parse_args(argv)
+    command, yolo = args.command, getattr(args, "yolo", False)
+    if command == "help":
+        (subs.get(args.topic) or parser).print_help()
+        return 0
+    if command == "start" and args.mode == "help":
+        subs[args.topic or "start"].print_help()
+        return 0
+    for path in (HOME, SESSIONS, RUN):
+        ensure_private_dir(path)
+    if command == "configure":
+        configure(interactive=sys.stdin.isatty())
+        return 0
+    if command == "show":
+        cmd_show(resolve_slug(args.slug), args.name)
+        return 0
+    cfg = load_config() or configure(interactive=sys.stdin.isatty())
+    if command == "sessions":
+        cmd_sessions(cfg, args.prune)
+        return 0
+    if command == "session":
+        slug = resolve_slug(args.slug)
+        holder = session_holder(slug)
+        if holder:
+            die(f"{slug} is open in another pantheon (pid {holder})")
+        return run_ui(cfg, slug, yolo)
+    if command == "start":
+        req = NewSession(args.mode, " ".join(args.task), args.dir, yolo, args.agent)
+        try:
+            slug, notes = prepare(cfg, req, confirm_dirty)
+        except PrepError as e:
+            die(str(e))
+        for note in notes:
+            print(f"pantheon: {note}")
+        return run_ui(cfg, slug, yolo)
+    return run_ui(cfg, None, yolo)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
