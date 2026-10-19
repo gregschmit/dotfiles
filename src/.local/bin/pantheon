@@ -11,6 +11,9 @@
 
 # Formatted with ruff's default settings: uvx ruff format <this file>
 
+# TODO (later): maybe an effort level high, and the room naming the model that really
+# ran (claude's SessionStart hook has it).
+
 """Pantheon runs a small team of AI coding agents in one terminal.
 
 Each agent is a real CLI (claude, codex, or gemini; claude can also run on an ollama
@@ -18,7 +21,8 @@ model). A mode is a series of stages. A stage gives one role to one agent, or to
 agent at once, each on its own branch, so a later stage can compare their work. Pantheon
 shows the team in a chat-room feed, gives each agent a tab with a live copy of its
 screen, and lets you "transport" into an agent's own terminal when it needs you. Ctrl-]
-or the button on tmux's status line brings you back.
+or the button on tmux's status line brings you back. The top row has a tab for each
+session you have open ({ and } switch them); the row below has its agents' tabs.
 
   pantheon                          open the session switcher
   pantheon start MODE [OPTIONS] [TASK]
@@ -26,12 +30,14 @@ or the button on tmux's status line brings you back.
       -C, --dir DIR                 start in DIR (default: the current directory)
       -a, --agents N|SPEC,...       how many agents, or which ones in order
       --agent STAGE=SPEC            the agent for one single-agent stage
+      --effort LEVEL                low, medium, max, or default (the tools' own)
       -y, --yolo, --no-yolo         start agents with permission checks off, or on;
                                     the yolo setting is the default
   pantheon start help [MODE]        list the modes, or show one mode's stages
   pantheon session SLUG             open a session (a unique part of the slug is enough)
   pantheon sessions [--prune DAYS]  list sessions; --prune deletes finished and old ones
   pantheon show SLUG [NAME]         print a session's room, or one of its results
+  pantheon agents [MODE]            show the agents and models a mode would get here
   pantheon tools                    show the claude, codex, gemini, and tmux found now
   pantheon config show              list the settings, with yours marked
   pantheon config set KEY VALUE     change a setting (unset KEY...: back to default)
@@ -39,12 +45,18 @@ or the button on tmux's status line brings you back.
   pantheon help [COMMAND]
 
 SPEC is TOOL[:MODEL][@EFFORT], where TOOL is claude, codex, gemini, or ollama. -a N takes
-the first N agents that can run here from the mode's list (the agents setting, unless the
-mode has its own), and the first agent plays each single-agent stage. Pantheon looks for
-the tools on PATH each time it starts; disable_TOOL = true leaves one out. TASK is free
-text, an issue number (123, or #123 in quotes for bash), or an issue URL.
+the first N tools that can run here, in the order of the agents setting (claude, codex,
+gemini, ollama), and the first agent plays each single-agent stage. Pantheon passes no
+model or effort, so each tool's own config decides, unless a SPEC or an effort level
+sets them. The levels are low (hello's), medium, and max; pantheon agents shows what each
+one gives each tool, and the ollama_models setting names an ollama model for each.
+Pantheon looks for the tools on PATH each time it starts; disable_TOOL = true leaves one
+out. TASK is free text, an issue number (123, or #123 in quotes for bash), or an issue
+URL.
 
 Agents keep your own setup: agent files, skills, MCP servers, and permission rules.
+An ollama agent is claude with the ollama server as its API; if claude keeps an API key
+from a Console login, it sends that key to the server too.
 Pantheon gives each step a short brief, and the agent writes its result to a file that
 ends with a "PANTHEON: <status>" line. Each session has a private tmux server, so agents
 keep running when pantheon exits. Claude and codex report through hooks; gemini reports
@@ -111,8 +123,10 @@ from textual.widgets import (
     OptionList,
     Select,
     Static,
+    Tab,
     TabbedContent,
     TabPane,
+    Tabs,
 )
 from textual.widgets.option_list import Option
 
@@ -147,10 +161,44 @@ ROLES = {
 # ---------------------------------------------------------------------------------- modes
 
 
-# The default of the agents setting: the agents, in order, for a mode with no list of
-# its own. -a N takes the first N that can run here, and the first agent plays every
-# single-agent stage.
-AGENTS = ("claude:opus@max", "codex", "gemini")  # SPEC: TOOL[:MODEL][@EFFORT]
+# The tools pantheon runs, in the order it picks them: the agents setting's default.
+# -a N takes the first N that can run here, and the first agent plays every
+# single-agent stage. An agent's model and effort come from the tool's own config,
+# unless a SPEC or an effort level sets them.
+TOOLS = ("claude", "codex", "gemini", "ollama")  # SPEC: TOOL[:MODEL][@EFFORT]
+
+# Effort levels, for a mode (Mode.effort) or a run (--effort): the (model, effort) each
+# tool gets, where "" leaves that part to the tool. Aliases, not model IDs, so the table
+# keeps up with new models; codex's model names change too often to name one.
+EFFORTS = {
+    "low": {
+        "claude": ("haiku", "low"),
+        "codex": ("", "low"),
+        "gemini": ("flash", ""),  # gemini has no effort: its model is the only knob
+        "ollama": ("", "low"),  # its think level, if the model has one
+    },
+    "medium": {
+        "claude": ("sonnet", "medium"),
+        "codex": ("", "medium"),
+        "gemini": ("auto", ""),  # gemini picks flash or pro for each turn
+        "ollama": ("", ""),  # models read medium differently, so each keeps its own
+    },
+    "max": {
+        "claude": ("", "max"),  # your model, at its top effort
+        "codex": ("", "xhigh"),  # every codex model takes xhigh; older ones lack max
+        "gemini": ("pro", ""),  # an account without pro gets a dialog on its first turn
+        "ollama": ("", "max"),  # or the model's own top level, if it lacks max
+    },
+}
+
+# The effort words each tool takes. Pantheon checks them because the tools check late:
+# claude only warns on stderr, and codex fails on the first turn.
+TOOL_EFFORTS = {
+    "claude": ("low", "medium", "high", "xhigh", "max", "ultracode"),
+    "codex": ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
+    "gemini": (),
+    "ollama": ("low", "medium", "high", "xhigh", "max"),  # claude passes them on
+}
 
 
 @dataclass(frozen=True)
@@ -189,7 +237,7 @@ class Mode:
     help: str
     stages: dict[str, Stage]
     flow: Callable[[Flow], Step | Finish]
-    agents: tuple[str, ...] = ()  # () means the agents setting (AGENTS by default)
+    effort: str = ""  # an EFFORTS level, or "": each tool's own config
     approve: tuple[str, ...] = ()  # stages whose results wait for your OK
     needs_task: bool = True
     needs_git: bool = True
@@ -312,7 +360,7 @@ MODES = {
             "hello": Stage("greeter", "your message", multi_agent=True, reuse=True)
         },
         flow=flow_hello,
-        agents=("claude:haiku@low", "codex@low", "gemini"),
+        effort="low",
         needs_task=False,
         needs_git=False,
         stop_when_done=True,
@@ -330,15 +378,18 @@ class Setting:
 
 # config.toml holds only the settings you change: pantheon config set KEY VALUE.
 SETTINGS = {
-    "agents": Setting(AGENTS, "agents, in order, for modes with no list of their own"),
+    "agents": Setting(TOOLS, "the tools to pick agents from, in order"),
     "yolo": Setting(False, "start agents with permission checks off (-y, --no-yolo)"),
     "disable_claude": Setting(False, "keep claude agents out of new sessions"),
     "disable_codex": Setting(False, "keep codex agents out of new sessions"),
     "disable_gemini": Setting(False, "keep gemini agents out of new sessions"),
     "disable_ollama": Setting(False, "keep ollama agents out of new sessions"),
     "ollama_url": Setting("", "the ollama server (empty: $OLLAMA_HOST, else local)"),
-    "ollama_model": Setting("", "the model for a SPEC of plain ollama"),
-    "ollama_context": Setting(32768, "the context size the server gives that model"),
+    "ollama_model": Setting("", "a plain ollama's model, unless ollama_models has one"),
+    "ollama_models": Setting(
+        {}, "a model per level, like low=qwen3.5:4b,max=qwen3.8:27b"
+    ),
+    "ollama_context": Setting(32768, "the context size the server gives ollama models"),
     "ollama_token_env": Setting("", "an env var with a bearer token for the server"),
 }
 
@@ -435,8 +486,6 @@ CREATE TABLE events (                       -- the room, plus hook summaries (ki
 """
 
 # ---------------------------------------------------------------------------------- tools
-
-TOOLS = ("claude", "codex", "gemini", "ollama")
 
 # Text that shows an agent's input box is on screen. Pantheon types only when it is.
 INPUT_MARKERS = {
@@ -565,15 +614,43 @@ def tool_path(tool: str) -> str:
     return path
 
 
-def launch_claude(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]:
+def model_args(tool: str, model: str, effort: str) -> list[str]:
+    """The flags that give an agent its model and effort (ollama's go to claude)."""
+    if tool == "codex":
+        argv = ["-m", model] if model else []
+        flag = f"model_reasoning_effort={json.dumps(effort)}"
+        return argv + (["-c", flag] if effort else [])
+    if tool == "gemini":  # gemini takes effort only through its model
+        return ["-m", model] if model else []
+    return (["--model", model] if model else []) + (
+        ["--effort", effort] if effort else []
+    )
+
+
+def launch_claude(
+    s: Session, a: AgentRun, first: str, route: dict | None = None
+) -> tuple[list[str], dict]:
+    # A settings file's env (user, project, local) beats the env claude starts with, and
+    # claude applies --settings after those files (only managed settings come later). So
+    # pantheon's own values go in --settings: the effort, which would also beat
+    # --effort, and an ollama agent's route.
+    values = dict(route or {})
+    if a.effort or a.tool == "ollama":
+        values["CLAUDE_CODE_EFFORT_LEVEL"] = a.effort or "auto"  # auto: not your effort
+    settings = claude_settings()
+    if values:
+        settings["env"] = values
+    if route:  # "": no apiKeyHelper, whose key claude would send this host as X-Api-Key
+        settings["apiKeyHelper"] = ""
+    text = json.dumps(settings)
+    if route:  # it can hold a real token, which must not show in ps
+        file = Path(s.scratch) / f".{a.name}.settings.json"
+        write_private(file, text)
+        text = str(file)
     argv = [tool_path("claude"), "--session-id", a.native_id]
     argv += ["--name", f"pantheon-{s.slug}-{a.name}", "--add-dir", s.scratch]
-    argv += ["--settings", json.dumps(claude_settings())]
-    if a.model:
-        argv += ["--model", a.model]
-    if a.effort:
-        # CLAUDE_CODE_EFFORT_LEVEL would beat --effort.
-        argv = ["env", "-u", "CLAUDE_CODE_EFFORT_LEVEL", *argv, "--effort", a.effort]
+    argv += ["--settings", text]
+    argv += model_args("claude", a.model, a.effort)
     if s.yolo:
         argv.append("--dangerously-skip-permissions")
     env = {"DISABLE_AUTOUPDATER": "1"}
@@ -608,10 +685,7 @@ def launch_codex(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]:
     # No folder-trust override: trusting a repo loads its .codex config (MCP servers,
     # sandbox), so codex asks you once per repo, through the startup watchdog.
     argv += codex_hook_args()
-    if a.model:
-        argv += ["-m", a.model]
-    if a.effort:
-        argv += ["-c", f"model_reasoning_effort={json.dumps(a.effort)}"]
+    argv += model_args("codex", a.model, a.effort)
     if s.yolo:
         argv.append("--dangerously-bypass-approvals-and-sandbox")
     return [*argv, "--", first], {}
@@ -623,34 +697,44 @@ def launch_gemini(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]
     # repo before it loads the repo's .gemini settings.
     argv = [tool_path("gemini"), "--session-id", a.native_id]
     argv += ["--include-directories", s.scratch]
-    if a.model:
-        argv += ["-m", a.model]
+    argv += model_args("gemini", a.model, a.effort)
     if s.yolo:
         argv += ["--approval-mode", "yolo"]
     return [*argv, "-i", first], {}
 
 
+# claude's provider switches. It reads "" as unset, so neither your shell nor your
+# settings can send an ollama agent to Bedrock and the like.
+CLAUDE_PROVIDERS = (
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "CLAUDE_CODE_USE_MANTLE",
+    "CLAUDE_CODE_USE_GATEWAY",
+)
+
+
 def launch_ollama(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]:
-    model = a.model  # resolve_roster fills it in from ollama_model
-    argv, env = launch_claude(s, replace(a, model=model), first)
+    model = a.model  # resolve_roster fills it in from ollama_models or ollama_model
     token_env = setting(s.cfg, "ollama_token_env")
-    env.update(
-        {
-            "ANTHROPIC_BASE_URL": ollama_server(s.cfg),
-            # Always set a token: without one, claude sends your claude.ai login to this host.
-            "ANTHROPIC_AUTH_TOKEN": (os.environ.get(token_env) if token_env else "")
-            or "ollama",
-            "ANTHROPIC_API_KEY": "",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
-            "ANTHROPIC_DEFAULT_FABLE_MODEL": model,
-            "CLAUDE_CODE_SUBAGENT_MODEL": model,
-            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(setting(s.cfg, "ollama_context")),
-            "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
-        }
-    )
-    return argv, env
+    route = {
+        "ANTHROPIC_BASE_URL": ollama_server(s.cfg),
+        # Always set a token: without one, claude sends your claude.ai login to this host.
+        "ANTHROPIC_AUTH_TOKEN": (os.environ.get(token_env) if token_env else "")
+        or "ollama",
+        "ANTHROPIC_API_KEY": "",
+        **dict.fromkeys(CLAUDE_PROVIDERS, ""),
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": model,
+        "CLAUDE_CODE_SUBAGENT_MODEL": model,
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(setting(s.cfg, "ollama_context")),
+        "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
+    }
+    return launch_claude(s, a, first, route)
 
 
 LAUNCHERS = {
@@ -806,29 +890,23 @@ def toml_value(v) -> str:
         return json.dumps(v, ensure_ascii=False).replace("\x7f", "\\u007f")
     if isinstance(v, list) and all(isinstance(x, str) for x in v):
         return "[" + ", ".join(toml_value(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return (
+            "{"
+            + ", ".join(f"{toml_key(k)} = {toml_value(x)}" for k, x in v.items())
+            + "}"
+        )
     raise TypeError(f"cannot write {type(v).__name__} to TOML")
 
 
+def toml_key(k: str) -> str:
+    return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k)
+
+
 def toml_dumps(data: dict) -> str:
-    """Write tables of str, bool, int, and list[str] (tomllib only reads)."""
-    value = toml_value
-
-    def key(k: str) -> str:
-        return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k)
-
-    lines: list[str] = []
-
-    def table(prefix: str, d: dict) -> None:
-        scalars = [(k, v) for k, v in d.items() if not isinstance(v, dict)]
-        if prefix and scalars:
-            lines.extend(["", f"[{prefix}]"])
-        lines.extend(f"{key(k)} = {value(v)}" for k, v in scalars)
-        for k, v in d.items():
-            if isinstance(v, dict):
-                table(f"{prefix}.{key(k)}" if prefix else key(k), v)
-
-    table("", data)
-    text = "\n".join(lines).lstrip("\n") + "\n"
+    """Write str, bool, int, list[str], and tables of them, one key a line (tomllib
+    only reads)."""
+    text = "".join(f"{toml_key(k)} = {toml_value(v)}\n" for k, v in data.items())
     if tomllib.loads(text) != data:  # never write a file that reads back differently
         raise ValueError("TOML round trip failed")
     return text
@@ -956,16 +1034,41 @@ def as_written(value) -> str:
 def check_setting(key: str, value):
     """value as the setting's type; ValueError says why it cannot be."""
     default = SETTINGS[key].default
-    if isinstance(default, tuple):  # agents: SPECs
+    if isinstance(default, tuple):  # agents: tool names
         if not isinstance(value, (list, tuple)) or not value:
             got = as_written(value)
-            raise ValueError(f'{key} is a list of SPECs, like ["codex"], not {got}')
-        for spec in value:
-            try:
-                parse_spec(spec if isinstance(spec, str) else as_written(spec))
-            except PrepError as e:
-                raise ValueError(f"{key}: {e}") from None
+            raise ValueError(f'{key} is a list of tools, like ["codex"], not {got}')
+        for tool in value:
+            if tool in TOOLS:
+                continue
+            why = f"{key} takes tool names ({', '.join(TOOLS)}), not {as_written(tool)}"
+            if isinstance(tool, str) and tool.startswith("ollama:"):
+                why += ". An ollama model goes in ollama_model, or in -a"
+            elif isinstance(tool, str) and re.search(r"[:@]", tool):
+                why += ". A model or effort goes in the tool's own config, or in -a"
+            raise ValueError(why)
         return tuple(value)
+    if isinstance(default, dict):  # ollama_models: level = model
+        items = value.items() if isinstance(value, dict) else None
+        if items is None:
+            got = as_written(value)
+            raise ValueError(
+                f'{key} is a table, like {{low = "qwen3.5:4b"}}, not {got}'
+            )
+        for level, model in items:
+            if level in SETTINGS:  # written below a [table] line, so it is in the table
+                raise ValueError(
+                    f"{key}: {level} is inside this table; move it above [{key}]"
+                )
+            if level not in EFFORTS:
+                raise ValueError(
+                    f"{key}: no effort level {level!r}; use {', '.join(EFFORTS)}"
+                )
+            if not isinstance(model, str) or not model or re.search(r"[\s,]", model):
+                raise ValueError(
+                    f"{key}.{level} is a model name, not {as_written(model)}"
+                )
+        return dict(value)
     if type(value) is not type(default):
         got = as_written(value)
         if isinstance(value, str):  # yolo = "true": the quotes make it text
@@ -1005,11 +1108,19 @@ def parse_setting(key: str, text: str):
         if not t.isdecimal():
             raise ValueError(f"{key} is a whole number")
         return int(t)
+    if isinstance(default, dict):
+        table = {}
+        for item in (x.strip() for x in t.split(",") if x.strip()):
+            level, sep, model = (x.strip() for x in item.partition("="))
+            if not sep:
+                raise ValueError(f"{key} takes LEVEL=MODEL,..., like low=qwen3.5:4b")
+            table[level] = model
+        return table
     if isinstance(default, tuple):
-        specs = tuple(x.strip() for x in t.split(",") if x.strip())
-        if not specs:
-            raise ValueError(f"{key} is a list of SPECs, like claude,codex")
-        return specs
+        tools = tuple(x.strip() for x in t.split(",") if x.strip())
+        if not tools:
+            raise ValueError(f"{key} is a list of tools, like claude,codex")
+        return tools
     return t
 
 
@@ -1051,7 +1162,10 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
-    data = {k: list(v) if isinstance(v, tuple) else v for k, v in cfg.items()}
+    # An empty table is the default, and TOML would not keep it.
+    data = {
+        k: list(v) if isinstance(v, tuple) else v for k, v in cfg.items() if v != {}
+    }
     head = "# pantheon settings. Change them with: pantheon config set KEY VALUE\n"
     write_private(CONFIG_PATH, head + toml_dumps(data))
 
@@ -1061,6 +1175,8 @@ def shown(value) -> str:
         return "true" if value else "false"
     if isinstance(value, tuple):
         return ",".join(value)
+    if isinstance(value, dict):
+        return ",".join(f"{k}={v}" for k, v in value.items()) or "{}"
     return str(value) if value != "" else '""'
 
 
@@ -1302,7 +1418,14 @@ def cmd_tools(cfg: dict) -> None:
     found["ollama"] = {
         "path": shutil.which("ollama") or "",
         "version": (answer or {}).get("version", ""),
-        "model": setting(cfg, "ollama_model"),
+        "model": " ".join(
+            x
+            for x in (
+                setting(cfg, "ollama_model"),
+                shown(setting(cfg, "ollama_models")),
+            )
+            if x and x != "{}"
+        ),
         "note": f"no server answers at {server}" if answer is None else server,
     }
     print("pantheon: found now (off: it cannot run, or you disabled it)")
@@ -1319,6 +1442,248 @@ def cmd_tools(cfg: dict) -> None:
     print(f"      tmux    {version:<30} {short_home(path)}  {note}".rstrip())
     for warning in agent_file_warnings(problems):
         print(f"  ! {warning}")
+
+
+CLAUDE_MANAGED = (
+    Path("/Library/Application Support/ClaudeCode")
+    if sys.platform == "darwin"
+    else Path("/etc/claude-code")
+) / "managed-settings.json"
+
+
+def claude_local_dir(workdir: str) -> Path:
+    """Where claude reads settings.local.json first: the repo's top, a linked worktree's
+    main checkout, or, in a bare repo's worktree, the start dir. It reads the start dir's
+    copy too, which loses."""
+    top = repo_dirs(workdir)[-1]
+    try:  # a worktree's .git file names its git dir, whose commondir is the main .git
+        text = (top / ".git").read_text(encoding="utf-8")
+        gitdir = top / text.removeprefix("gitdir:").strip()
+        common = gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        if common.resolve().name == ".git":
+            top = common.resolve().parent
+        elif not (common / ".git").exists():
+            # claude takes the bare repo as the top, finds no .git there to check its
+            # owner, and falls back to the start dir.
+            return Path(workdir)
+    except (OSError, ValueError):
+        pass
+    # With your home dir as the top, claude keeps the start dir's file.
+    home = os.path.realpath(Path.home())
+    return Path(workdir) if os.path.realpath(top) == home else top
+
+
+def claude_settings_files(workdir: str) -> list[Path]:
+    """claude's settings files, the one that wins first, each real file once."""
+    home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    project = Path(workdir) / ".claude"
+    local = claude_local_dir(workdir) / ".claude" / "settings.local.json"
+    files = [CLAUDE_MANAGED, local, project / "settings.local.json"]
+    files.append(project / "settings.json")
+    out, seen = [], set()
+    for path in [*files, home / "settings.json"]:
+        if os.path.realpath(path) not in seen:
+            seen.add(os.path.realpath(path))
+            out.append(path)
+    return out
+
+
+def repo_dirs(workdir: str) -> list[Path]:
+    """workdir and its parents up to its git repo's top, nearest first; outside a repo,
+    workdir alone."""
+    dirs = []
+    for d in [Path(workdir), *Path(workdir).parents]:
+        dirs.append(d)
+        if (d / ".git").exists():
+            return dirs
+    return dirs[:1]
+
+
+def text_of(value) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def tool_defaults(tool: str, workdir: str) -> dict[str, str]:
+    """What a tool's own config says about its model and effort, the value that wins
+    first. A guide only: pantheon cannot see an account's default, or the model behind
+    an alias."""
+    trusted = ", if you trust this folder"
+    if tool == "claude":
+        files = [(path, read_jsonc(path)) for path in claude_settings_files(workdir)]
+        home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+        user = os.path.realpath(home / "settings.json")
+        kept = clean_env()  # inside Claude Code, agents get no CLAUDE_CODE_ vars
+        model, effort = [], []
+        # A settings file's env beats your shell's, and both beat the settings.
+        for var, found in (
+            ("ANTHROPIC_MODEL", model),
+            ("CLAUDE_CODE_EFFORT_LEVEL", effort),
+        ):
+            for path, d in files:
+                if value := text_of(dig(d, "env", var)):
+                    found.append(f"{value} (env in {short_home(str(path))})")
+            if value := os.environ.get(var):
+                lost = "" if var in kept else ", but agents started here do not get it"
+                found.append(f"{value} (${var}{lost})")
+        for path, d in files:
+            where = short_home(str(path))
+            if value := text_of(d.get("model")):
+                model.append(f"{value} ({where})")
+            per = d.get("modelSettings")
+            for name, v in per.items() if isinstance(per, dict) else ():
+                if value := text_of(dig(v, "effortLevel")):
+                    effort.append(f"{value} for {name} ({where})")
+            if value := text_of(d.get("effortLevel")):
+                if os.path.realpath(path) == user:  # the older /effort key
+                    value += " for models before Opus 5.5"
+                effort.append(f"{value} ({where})")
+        return {
+            "model": " over ".join(model) or "your account's default",
+            "effort": " over ".join(effort) or "the model's default",
+        }
+    if tool == "codex":
+        home = (
+            Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+        )
+        # In a folder you trust, codex also reads .codex/config.toml from the repo's top
+        # down to the start dir, and the nearest wins.
+        files = [
+            (d / ".codex" / "config.toml", trusted)
+            for d in repo_dirs(workdir)
+            if (d / ".codex").is_dir()  # codex skips a .codex that is not a folder
+        ]
+        model, effort = [], []
+        for path, note in [*files, (home, "")]:
+            if note and os.path.realpath(path) == os.path.realpath(home):
+                continue
+            where = short_home(str(path)) + note
+            try:
+                conf = tomllib.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError):  # codex cannot start with it either
+                model.append(f"unknown (cannot read {where})")
+                effort.append(f"unknown (cannot read {where})")
+                continue
+            if value := text_of(conf.get("model")):
+                model.append(f"{value} ({where})")
+            if value := text_of(conf.get("model_reasoning_effort")):
+                effort.append(f"{value} ({where})")
+        return {
+            "model": " over ".join(model) or "codex's default",
+            "effort": " over ".join(effort) or "the model's default",
+        }
+    if tool == "gemini":
+        model = []
+        if value := os.environ.get("GEMINI_MODEL"):
+            model.append(f"{value} ($GEMINI_MODEL)")
+        user = gemini_home() / "settings.json"
+        workspace = Path(workdir) / ".gemini" / "settings.json"
+        for path, note in ((workspace, trusted), (user, "")):
+            if note and os.path.realpath(path) == os.path.realpath(user):
+                continue
+            if value := text_of(dig(read_jsonc(path), "model", "name")):
+                model.append(f"{value} ({short_home(str(path))}{note})")
+        return {"model": " over ".join(model) or "auto, gemini's default"}
+    return {}  # ollama: pantheon always passes its model
+
+
+def shown_flags(tool: str, model: str, effort: str) -> str:
+    """What pantheon passes an agent for its model and effort, as you would type it."""
+    text = shlex.join(model_args(tool, model, effort)) or "nothing"
+    if tool == "ollama" and not effort:
+        text += ", and CLAUDE_CODE_EFFORT_LEVEL=auto (no effort)"
+    return text
+
+
+def stage_players(mode: Mode, roster: list, picks: dict[str, str]) -> dict[str, list]:
+    """The stages each agent starts with (a flow may later hand a stage to the agent
+    whose work it kept)."""
+    keys = [r[0] for r in roster if r[4]]
+    plays: dict[str, list] = {r[0]: [] for r in roster}
+    for stage, st in mode.stages.items():
+        for key in keys if st.multi_agent else [picks.get(stage, keys[0])]:
+            plays[key].append(stage)
+    return plays
+
+
+def cmd_agents(cfg: dict, args) -> None:
+    """What pantheon start would pick here, and what each tool's config says."""
+    workdir = os.path.realpath(os.path.expanduser(args.dir))
+    if not os.path.isdir(workdir):
+        die(f"{args.dir} is not a directory")
+    if not args.mode:
+        if args.agents or args.agent or args.effort:
+            die("-a, --agent, and --effort need a MODE")
+        cmd_pool(cfg, workdir)
+        return
+    mode, given = MODES[args.mode], effort_arg(args.effort)
+    for level in [given] if given is not None else ["", *EFFORTS]:
+        title = f"{args.mode} at {level}" if level else f"{args.mode} with no level"
+        if given is None and level == mode.effort:
+            title += " (what start uses)"
+        try:
+            roster, picks, notes = resolve_roster(
+                cfg, args.mode, args.agents, args.agent, level
+            )
+        except PrepError as e:
+            print(f"pantheon: {title}: {e}")
+            continue
+        print(f"pantheon: {title}")
+        plays = stage_players(mode, roster, picks)
+        for key, tool, model, effort, _ in roster:
+            print(f"  {key:<10} plays {', '.join(plays[key])}")
+            print(f"  {'':<10} passes {shown_flags(tool, model, effort)}")
+            given_parts = {"model": model, "effort": effort}
+            left = [
+                f"{part} {how}"
+                for part, how in tool_defaults(tool, workdir).items()
+                if not given_parts[part]
+            ]
+            if left:
+                print(f"  {'':<10} {tool}'s config: {'; '.join(left)}")
+        for note in notes:
+            print(f"  ({note})")
+
+
+def cmd_pool(cfg: dict, workdir: str) -> None:
+    """The tools pantheon picks from, in order, and the effort levels."""
+    problems = tool_problems(cfg)
+    pool = setting(cfg, "agents")
+    print(f"pantheon: the agents setting, in order: {', '.join(pool)}")
+    for tool in dict.fromkeys(pool):
+        why = problems[tool]
+        ollama = setting(cfg, "ollama_model") or setting(cfg, "ollama_models")
+        if not why and tool == "ollama" and not ollama:
+            why = "no ollama_model or ollama_models is set"
+        print(f"  {tool:<10} {'cannot run: ' + why if why else 'can run'}")
+        if why:
+            continue
+        if tool == "ollama":
+            model = setting(cfg, "ollama_model") or "none"
+            per = ", ".join(
+                f"{k} {v}" for k, v in setting(cfg, "ollama_models").items()
+            )
+            print(
+                f"  {'':<10} model {model} (ollama_model); {per or 'none'} (ollama_models)"
+            )
+            print(f"  {'':<10} at {ollama_server(cfg)}")
+            continue
+        found = "; ".join(f"{k} {v}" for k, v in tool_defaults(tool, workdir).items())
+        print(f"  {'':<10} its config: {found}")
+    print("effort levels (a mode's, or start --effort LEVEL):")
+    for level, cells in EFFORTS.items():
+        for i, tool in enumerate(TOOLS):
+            model, effort = cells.get(tool, ("", ""))
+            if tool == "ollama":
+                model = model or ollama_model_for(cfg, level)
+            flags = shown_flags(tool, model, effort)
+            if tool == "ollama" and not model:  # start skips a plain ollama here
+                flags = (
+                    f"cannot run: no ollama_model is set, and no ollama_models.{level}"
+                )
+            name = level if i == 0 else ""
+            print(f"  {name:<10} {tool:<7} {flags}")
 
 
 # ---------------------------------------------------------------------------------- store
@@ -1408,6 +1773,10 @@ def view_id(slug: str) -> str:
     return "s-" + hashlib.sha1(slug.encode()).hexdigest()[:12]
 
 
+def tab_id(slug: str) -> str:
+    return "tab-" + view_id(slug)
+
+
 def session_holder(slug: str) -> int:
     try:
         db = connect(db_path(slug))
@@ -1480,27 +1849,55 @@ def default_count(mode: Mode) -> int:
     return 2 if mode.multi_agent else 1
 
 
+def effort_arg(text: str | None) -> str | None:
+    """--effort as typed: None if not given, "" for default (no level), else a level."""
+    return None if text is None else "" if text == "default" else text
+
+
+def effort_level(mode: Mode, effort: str | None) -> str:
+    """The level a run uses: --effort's ("": none), else the mode's."""
+    return mode.effort if effort is None else effort
+
+
+def ollama_model_for(cfg: dict, level: str) -> str:
+    """The model a plain ollama gets: ollama_models' for the level, else ollama_model."""
+    return setting(cfg, "ollama_models").get(level, "") or setting(cfg, "ollama_model")
+
+
 def resolve_roster(
-    cfg: dict, mode_name: str, agents: str, picks: list[str]
+    cfg: dict,
+    mode_name: str,
+    agents: str,
+    picks: list[str],
+    level: str | None = None,
 ) -> tuple[list[tuple[str, str, str, str, int]], dict[str, str], list[str]]:
-    """Read -a and --agent. Returns the roster as (key, tool, model, effort, listed),
-    the --agent picks as {stage: key}, and notes for you."""
+    """Read -a, --agent, and --effort's level (None: the mode's). Returns the roster as
+    (key, tool, model, effort, listed), the --agent picks as {stage: key}, and notes."""
     mode = MODES[mode_name]
+    level = effort_level(mode, level)
+    if level and level not in EFFORTS:
+        raise PrepError(
+            f"no effort level {level!r}; use {', '.join(EFFORTS)}, or default"
+        )
     problems = tool_problems(cfg)
     notes: list[str] = []
     text = agents.strip()
     if not text or text.isdecimal():
         n = int(text) if text else default_count(mode)
-        pool = mode.agents or setting(cfg, "agents")
+        pool = setting(cfg, "agents")
         specs, skipped = [], []
-        for spec in pool:  # the first n that can run here, in order
+        for tool in pool:  # the first n that can run here, in order
             if len(specs) == n:
                 break
-            why = problems[parse_spec(spec)[0]]
+            why = problems[tool]
+            if not why and tool == "ollama" and not ollama_model_for(cfg, level):
+                why = "no ollama_model is set" + (
+                    f", and no ollama_models.{level}" if level else ""
+                )
             if why:
-                skipped.append(f"{spec}: {why}")
+                skipped.append(f"{tool}: {why}")
             else:
-                specs.append(spec)
+                specs.append(tool)
         if n and len(specs) < n:
             why = f" Skipped: {'; '.join(skipped)}." if skipped else ""
             again = ",".join(specs[i % len(specs)] for i in range(n)) if specs else ""
@@ -1509,7 +1906,7 @@ def resolve_roster(
             )
             raise PrepError(
                 f"this needs {n} agent{'s' if n != 1 else ''} that can run here, and "
-                f"the list ({', '.join(pool)}) has {len(specs)}.{why}{hint}"
+                f"the agents setting ({', '.join(pool)}) has {len(specs)}.{why}{hint}"
             )
         if skipped:
             notes.append(f"skipped, since they cannot run here: {'; '.join(skipped)}")
@@ -1529,17 +1926,30 @@ def resolve_roster(
         tool, model, effort = parse_spec(spec)
         if problems[tool]:
             raise PrepError(f"{tool} cannot run here: {problems[tool]}")
-        if tool == "ollama" and not model:
-            model = setting(cfg, "ollama_model")
-            if not model:
-                raise PrepError(
-                    "ollama needs a model: write ollama:MODEL, or run "
-                    "pantheon config set ollama_model MODEL"
-                )
         if tool == "gemini" and effort:
-            note = f"gemini has no per-run effort setting, so @{effort} is ignored"
+            note = (
+                f"gemini takes effort only through its model, so @{effort} is ignored"
+            )
             notes.extend([note] if note not in notes else [])
             effort = ""
+        if effort and effort not in TOOL_EFFORTS[tool]:
+            raise PrepError(
+                f"{tool} takes effort {', '.join(TOOL_EFFORTS[tool])}, not {effort!r}"
+            )
+        # Your SPEC's parts win, the level fills the blanks, and the tool does the rest.
+        cell = EFFORTS[level].get(tool, ("", "")) if level else ("", "")
+        model, effort = model or cell[0], effort or cell[1]
+        if tool == "ollama" and not model:
+            model = ollama_model_for(cfg, level)
+            if not model:
+                per_level = ","
+                if level:  # config set replaces the whole table, so keep its levels
+                    levels = shown({**setting(cfg, "ollama_models"), level: "MODEL"})
+                    per_level = f", run pantheon config set ollama_models {levels},"
+                raise PrepError(
+                    f"ollama needs a model: write ollama:MODEL{per_level} or run "
+                    "pantheon config set ollama_model MODEL"
+                )
         if not listed:  # an agent -a has already keeps its key
             for row in roster:
                 if row[1:4] == (tool, model, effort):
@@ -1698,6 +2108,7 @@ class NewSession:
     yolo: bool
     agents: str = ""  # -a: how many, or SPEC,SPEC,...
     stage_agents: list[str] = field(default_factory=list)  # --agent STAGE=SPEC
+    effort: str | None = None  # --effort: a level, or "" for none; None: the mode's
 
 
 def dirty_files(workdir: str) -> list[str]:
@@ -1714,7 +2125,9 @@ def prepare(
     workdir = os.path.realpath(os.path.expanduser(req.dir or "."))
     if not os.path.isdir(workdir):
         raise PrepError(f"{req.dir} is not a directory")
-    roster, picks, notes = resolve_roster(cfg, req.mode, req.agents, req.stage_agents)
+    roster, picks, notes = resolve_roster(
+        cfg, req.mode, req.agents, req.stage_agents, req.effort
+    )
     base, pre_existing = "", []
     if mode.needs_git:
         if git(workdir, "rev-parse", "--show-toplevel")[0]:
@@ -1794,6 +2207,8 @@ def prepare(
             opening += f" for {source}"
         opening += " with " + ", ".join(specs[r[0]] for r in roster if r[4])
         opening += "".join(f"; {stage}: {specs[key]}" for stage, key in picks.items())
+        level = effort_level(mode, req.effort)
+        opening += f" (effort {level})" if level else ""
         for text in [opening + ".", *notes]:
             db.execute(
                 "INSERT INTO events (at, kind, text) VALUES (?, 'note', ?)", (now, text)
@@ -2005,6 +2420,7 @@ class AgentRun:
     title: str = ""
     typeable: bool = False  # it needs you, but pantheon may still type to it
     saw_work: bool = False  # gemini showed its working title since its last turn ended
+    in_turn: bool = False  # from a prompt to its Stop: tool hooks count only then
     last_message: str = ""
     # (text, step id, or None for a reminder) to type once the agent is idle
     outbox: list = field(default_factory=list)
@@ -2172,6 +2588,13 @@ class Session:
             ).fetchone()
             data = json.loads(row["data"]) if row else {}
             a.typeable = bool(data.get("typeable") or data.get("remind"))
+        # The file keeps no turn. A wait pantheon may type through, or a StopFailure's,
+        # comes after one.
+        a.in_turn = a.state == "working" or (
+            a.state == "needs_you"
+            and not a.typeable
+            and not a.reason.startswith("error: ")
+        )
 
     # -- records
 
@@ -2387,8 +2810,13 @@ class Session:
         if name == "SessionStart":
             if a.tool == "codex" and ev.get("session_id") and not a.native_id:
                 self.save_agent(a, native_id=ev["session_id"])
-        elif name in ("UserPromptSubmit", "PostToolBatch", "PostToolUse"):
+        elif name == "UserPromptSubmit":
+            a.in_turn = True
             self.set_state(a, "working")
+        elif name in ("PostToolBatch", "PostToolUse"):
+            # Claude can send one after its Stop; it must not undo the turn's end.
+            if a.in_turn:
+                self.set_state(a, "working")
         elif name == "PermissionRequest":
             self.needs_you(a, "permission: " + describe_tool(ev))
         elif name == "PreToolUse":  # AskUserQuestion or ExitPlanMode
@@ -2409,8 +2837,10 @@ class Session:
                 step is None or not self.result_of(step)[0]
             ):
                 return
+            a.in_turn = False
             self.turn_ended(a)
         elif name == "StopFailure":
+            a.in_turn = False
             self.needs_you(a, f"error: {ev.get('error', 'unknown')}")
 
     def on_title(self, a: AgentRun, title: str) -> None:
@@ -2795,6 +3225,7 @@ class Session:
             a.blocked_screen = ""
             if step_id:
                 self.db.execute("UPDATE steps SET sent = 1 WHERE id = ?", (step_id,))
+            a.in_turn = True
             self.set_state(a, "working")
 
     async def finish(self, fin: Finish) -> None:
@@ -2944,6 +3375,10 @@ def agent_color(a: AgentRun) -> str:
             int(hashlib.sha1(a.name.encode()).hexdigest(), 16) % len(OLLAMA_COLORS)
         ]
     return TOOL_COLORS.get(a.tool, "white")
+
+
+def session_label(s: Session) -> Content:
+    return Content(f"{SESSION_BADGES.get(s.state, '?')} {s.slug}")
 
 
 def tab_label(a: AgentRun) -> Content:
@@ -3298,6 +3733,16 @@ class NewSessionScreen(ModalScreen):
                 placeholder="Agents: how many, or SPEC,SPEC,... (empty: the mode's default)",
                 id="agents",
             )
+            yield Select(
+                [
+                    ("Effort: the mode's level", "mode"),
+                    ("Effort: each tool's own config", "default"),
+                ]
+                + [(f"Effort: {level}", level) for level in EFFORTS],
+                value="mode",
+                allow_blank=False,
+                id="effort",
+            )
             yield Input(value=os.getcwd(), placeholder="Start dir", id="dir")
             yield Checkbox(
                 "yolo: start agents with permission checks off", self.yolo, id="yolo"
@@ -3307,6 +3752,7 @@ class NewSessionScreen(ModalScreen):
                 yield Button("Cancel", id="cancel")
 
     def submit(self) -> None:
+        effort = str(self.query_one("#effort", Select).value)
         self.dismiss(
             NewSession(
                 mode=str(self.query_one("#mode", Select).value),
@@ -3314,6 +3760,7 @@ class NewSessionScreen(ModalScreen):
                 dir=self.query_one("#dir", Input).value.strip(),
                 yolo=self.query_one("#yolo", Checkbox).value,
                 agents=self.query_one("#agents", Input).value.strip(),
+                effort=None if effort == "mode" else effort_arg(effort),
             )
         )
 
@@ -3364,7 +3811,14 @@ class PantheonApp(App):
     TITLE = "pantheon"
     CSS = """
     #top { height: 1; background: $primary 30%; }
-    #header { width: 1fr; padding: 0 1; text-wrap: nowrap; text-overflow: ellipsis; }
+    #sessions { width: 1fr; height: 1; }
+    #sessions Underline { display: none; }
+    #sessions Tab.-active { background: $primary 60%; text-style: bold; }
+    #sessions Tab.-needs { background: $warning 50%; text-style: bold; }
+    #header {
+        width: auto; max-width: 60%; padding: 0 1;
+        text-wrap: nowrap; text-overflow: ellipsis;
+    }
     #yolo-badge { width: auto; padding: 0 1; background: $error; text-style: bold; display: none; }
     #yolo-badge.-on { display: block; }
     ContentSwitcher { height: 1fr; }
@@ -3374,6 +3828,8 @@ class PantheonApp(App):
     BINDINGS = [
         Binding("left_square_bracket", "tab(-1)", "Prev tab"),
         Binding("right_square_bracket", "tab(1)", "Next tab"),
+        Binding("left_curly_bracket", "session(-1)", "Prev session", show=False),
+        Binding("right_curly_bracket", "session(1)", "Next session", show=False),
         Binding("ctrl+t", "transport", "Transport"),
         Binding("ctrl+o", "sessions", "Sessions"),
         Binding("ctrl+n", "new_session", "New"),
@@ -3396,6 +3852,9 @@ class PantheonApp(App):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="top"):
+            sessions = Tabs(id="sessions")
+            sessions.can_focus = False  # ← and → stay with the agents' tabs
+            yield sessions
             yield Static(id="header")
             badge = Static("⚠ YOLO", id="yolo-badge")
             badge.tooltip = "These agents run with their permission checks off."
@@ -3443,14 +3902,41 @@ class PantheonApp(App):
             await self.query_one(ContentSwitcher).mount(
                 SessionView(s, id=view_id(slug))
             )
+            await self.query_one("#sessions", Tabs).add_tab(
+                Tab(session_label(s), id=tab_id(slug))
+            )
             if s.foreign:
                 self.notify(
                     f"{slug} comes from another install, so it opens read-only."
                 )
             else:
                 self.run_worker(s.run(), group="engine", exit_on_error=False)
+        self.show_session(slug)
+
+    def show_session(self, slug: str) -> None:
         self.current = slug
         self.query_one(ContentSwitcher).current = view_id(slug)
+        tabs = self.query_one("#sessions", Tabs)
+        tabs.active = tab_id(slug)
+        # Tabs scrolls to the tab it makes active, but a new tab has no place yet.
+        tab = tabs.active_tab
+        if tab is not None:
+            self.call_after_refresh(tab.scroll_visible, animate=False, force=True)
+
+    def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
+        # A session's tab; each session's TabbedContent keeps its agents' tabs to itself.
+        # Each switch posts one of these, so act only on the tab that is still active.
+        if event.tabs.id != "sessions" or event.tab.id != event.tabs.active:
+            return
+        slug = next((x for x in self.sessions if tab_id(x) == event.tab.id), "")
+        if slug and slug != self.current:
+            self.show_session(slug)
+
+    def action_session(self, step: int) -> None:
+        slugs = list(self.sessions)
+        if slugs:
+            i = slugs.index(self.current) if self.current in slugs else 0
+            self.show_session(slugs[(i + step) % len(slugs)])
 
     async def refresh_ui(self) -> None:
         if self.transporting:
@@ -3460,16 +3946,23 @@ class PantheonApp(App):
         if view is not None:
             await view.sync()
         s = self.sessions.get(self.current)
-        waiting = ("needs_you", "waiting")
-        others = sum(
-            1
-            for slug, x in self.sessions.items()
-            if slug != self.current and x.state in waiting
-        )
-        pieces: list = ["pantheon"]
+        tabs = self.query_one("#sessions", Tabs)
+        hidden = 0  # sessions that need you, with their tab out of view
+        for slug, x in self.sessions.items():
+            for tab in tabs.query(f"#{tab_id(slug)}").results(Tab):
+                label = session_label(x)
+                if tab.label_text != label.plain:
+                    tab.label = label
+                needs = slug != self.current and x.state in ("needs_you", "waiting")
+                tab.set_class(needs, "-needs")
+                if needs and not tabs.region.contains_region(tab.region):
+                    hidden += 1
+        # A long row of tabs can hide a marked one. First, so no ellipsis cuts it.
+        pieces: list = [(f"⚑ {hidden} more · ", "bold") if hidden else ""]
+        pieces.append("pantheon" if s is None else "")
         if s is not None:
             state = s.state.replace("_", " ") + (" (read-only)" if s.foreign else "")
-            pieces += [f" · {s.slug} · {s.mode_name} · {state}"]
+            pieces += [f"{s.mode_name} · {state}"]
             agent, label = s.step_label()
             if agent is not None:
                 pieces += [
@@ -3479,8 +3972,6 @@ class PantheonApp(App):
                 ]
             elif label:
                 pieces.append(f" · {label}")
-        if others:
-            pieces.append(f" · ⚑ {others} other")
         self.query_one("#header", Static).update(Content.assemble(*pieces))
         # The session in view decides: yolo is fixed when a session starts.
         self.query_one("#yolo-badge").set_class(s.yolo if s else self.yolo, "-on")
@@ -3489,7 +3980,7 @@ class PantheonApp(App):
                 x.state == "waiting"
             )
             if slug != self.current and n > self.seen_needs.get(slug, 0):
-                self.notify(f"{slug} needs you (ctrl+o to switch)", severity="warning")
+                self.notify(f"{slug} needs you", severity="warning")
             self.seen_needs[slug] = n
 
     def check_auto_return(self) -> None:
@@ -3953,11 +4444,16 @@ def mode_description(mode: Mode) -> str:
         how = "every agent at once" if st.multi_agent else "one agent"
         how += ", reused in later rounds" if st.reuse else ""
         lines.append(f"  {name:<{width}}  {st.role} ({how})")
-    pool = ", ".join(mode.agents) if mode.agents else "the agents setting"
+    level = (
+        f"Effort level: {mode.effort}."
+        if mode.effort
+        else "No effort level: each tool's own config decides."
+    )
     about = (
-        f"agents: {pool}. -a N takes the first N that can run here (default: "
-        f"{default_count(mode)}), and the first agent plays each one-agent stage. SPEC is "
-        "TOOL[:MODEL][@EFFORT], where TOOL is claude, codex, gemini, or ollama."
+        f"{level} -a N takes the first N tools in the agents setting that can run here "
+        f"(default: {default_count(mode)}), and the first agent plays each one-agent "
+        "stage. SPEC is TOOL[:MODEL][@EFFORT], where TOOL is claude, codex, gemini, or "
+        "ollama. pantheon agents MODE shows what it would pick here."
     )
     return "\n".join(lines) + "\n\n" + textwrap.fill(about, 80)
 
@@ -3978,16 +4474,14 @@ def mode_problems() -> list[str]:
             for x in mode.approve
             if x not in mode.stages
         ]
-        for spec in mode.agents:
-            try:
-                parse_spec(spec)
-            except PrepError as e:
-                out.append(f"{name}: {e}")
-    for spec in AGENTS:
-        try:
-            parse_spec(spec)
-        except PrepError as e:
-            out.append(f"AGENTS: {e}")
+        if mode.effort and mode.effort not in EFFORTS:
+            out.append(f"{name}: no effort level {mode.effort!r}")
+    for level, cells in EFFORTS.items():
+        for tool, (_, effort) in cells.items():
+            if tool not in TOOLS:
+                out.append(f"EFFORTS[{level!r}]: no tool {tool!r}")
+            elif effort and effort not in TOOL_EFFORTS[tool]:
+                out.append(f"EFFORTS[{level!r}]: {tool} takes no effort {effort!r}")
     return out
 
 
@@ -4048,6 +4542,13 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict]:
             + (", ".join(singles) or "none in this mode"),
         )
         p.add_argument(
+            "--effort",
+            choices=[*EFFORTS, "default"],
+            metavar="LEVEL",
+            help=f"an effort level ({', '.join(EFFORTS)}), or default for the tools' own "
+            f"config (this mode: {mode.effort or 'default'})",
+        )
+        p.add_argument(
             "task",
             nargs="+" if mode.needs_task else "*",
             metavar="TASK",
@@ -4089,11 +4590,41 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict]:
         dest="action", metavar="ACTION", required=True
     )
     actions.add_parser("show", help="list the settings, with yours marked")
-    p = actions.add_parser("set", help="change a setting; agents takes SPEC,SPEC,...")
+    p = actions.add_parser(
+        "set",
+        help="change a setting; agents takes TOOL,TOOL,... and ollama_models "
+        "LEVEL=MODEL,...",
+    )
     p.add_argument("key", metavar="KEY")
     p.add_argument("value", metavar="VALUE")
     p = actions.add_parser("unset", help="put settings back to their defaults")
     p.add_argument("keys", nargs="+", metavar="KEY")
+    subs["agents"] = sub.add_parser(
+        "agents",
+        help="show the agents and models a mode would get here",
+        description="Show what pantheon start MODE would pick here, with no session: "
+        "the agents, the stages each plays, the flags each gets, and what each tool's "
+        "own config says about the rest. With no MODE: the tools, and the effort levels.",
+    )
+    p = subs["agents"]
+    p.add_argument("mode", nargs="?", choices=list(MODES), metavar="MODE")
+    p.add_argument("-C", "--dir", default=".", metavar="DIR", help="as for start")
+    p.add_argument(
+        "-a", "--agents", default="", metavar="N|SPEC,...", help="as for start"
+    )
+    p.add_argument(
+        "--agent",
+        action="append",
+        default=[],
+        metavar="STAGE=SPEC",
+        help="as for start",
+    )
+    p.add_argument(
+        "--effort",
+        choices=[*EFFORTS, "default"],
+        metavar="LEVEL",
+        help="one effort level, or default (default: show each)",
+    )
     subs["tools"] = sub.add_parser(
         "tools", help="show the claude, codex, gemini, and tmux found now"
     )
@@ -4148,6 +4679,9 @@ def main(argv: list[str] | None = None) -> int:
     if command == "tools":
         cmd_tools(cfg)
         return 0
+    if command == "agents":
+        cmd_agents(cfg, args)
+        return 0
     if command == "session":
         slug = resolve_slug(args.slug)
         holder = session_holder(slug)
@@ -4157,7 +4691,15 @@ def main(argv: list[str] | None = None) -> int:
     if command == "start":
         task = " ".join(args.task)
         yolo = setting(cfg, "yolo") if yolo_flag is None else yolo_flag
-        req = NewSession(args.mode, task, args.dir, yolo, args.agents, args.agent)
+        req = NewSession(
+            args.mode,
+            task,
+            args.dir,
+            yolo,
+            args.agents,
+            args.agent,
+            effort_arg(args.effort),
+        )
         try:
             slug, notes = prepare(cfg, req, confirm_dirty)
         except PrepError as e:
