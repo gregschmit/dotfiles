@@ -11,18 +11,19 @@
 
 # Formatted with ruff's default settings: uvx ruff format <this file>
 
-# TODO (later): maybe an effort level high, and the room naming the model that really
-# ran (claude's SessionStart hook has it).
-
-"""Pantheon runs a small team of AI coding agents in one terminal.
+"""Pantheon: agent collaboration and convergence.
 
 Each agent is a real CLI (claude, codex, or gemini; claude can also run on an ollama
 model). A mode is a series of stages. A stage gives one role to one agent, or to every
-agent at once, each on its own branch, so a later stage can compare their work. Pantheon
-shows the team in a chat-room feed, gives each agent a tab with a live copy of its
-screen, and lets you "transport" into an agent's own terminal when it needs you. Ctrl-]
-or the button on tmux's status line brings you back. The top row has a tab for each
-session you have open ({ and } switch them); the row below has its agents' tabs.
+agent at once, one per track. In implement, each track has its own architect, engineer,
+and reviewer: the architect writes a design, the engineer builds it on a branch of its
+own, and the reviewer reviews it, until the reviewer approves, the engineer refuses the
+changes asked for, or the rounds run out. Then the project manager compares the builds,
+picks one, and writes the report for you. Pantheon shows the team in a chat-room feed
+(the room), gives each agent a tab with a live copy of its screen, and lets you
+"transport" into an agent's own terminal when it needs you. Ctrl-] or the button on
+tmux's status line brings you back. The top row has a tab for each session you have
+open ({ and } switch them); the row below has its agents' tabs.
 
   pantheon                          open the session switcher
   pantheon start MODE [OPTIONS] [TASK]
@@ -30,13 +31,15 @@ session you have open ({ and } switch them); the row below has its agents' tabs.
       -C, --dir DIR                 start in DIR (default: the current directory)
       -a, --agents N|SPEC,...       how many agents, or which ones in order
       --agent STAGE=SPEC            the agent for one single-agent stage
-      --effort LEVEL                low, medium, max, or default (the tools' own)
+      --effort LEVEL                low, medium, high, max, or default (the tools' own)
       -y, --yolo, --no-yolo         start agents with permission checks off, or on;
                                     the yolo setting is the default
   pantheon start help [MODE]        list the modes, or show one mode's stages
   pantheon session SLUG             open a session (a unique part of the slug is enough)
   pantheon sessions [--prune DAYS]  list sessions; --prune deletes finished and old ones
   pantheon show SLUG [NAME]         print a session's room, or one of its results
+  pantheon room SLUG [--last N]     print a session's room: its last 50 entries, or N
+  pantheon say SLUG MESSAGE         post to a session's room; - reads it from stdin
   pantheon agents [MODE]            show the agents and models a mode would get here
   pantheon tools                    show the claude, codex, gemini, and tmux found now
   pantheon config show              list the settings, with yours marked
@@ -46,28 +49,38 @@ session you have open ({ and } switch them); the row below has its agents' tabs.
 
 SPEC is TOOL[:MODEL][@EFFORT], where TOOL is claude, codex, gemini, or ollama. -a N takes
 the first N tools that can run here, in the order of the agents setting (claude, codex,
-gemini, ollama), and the first agent plays each single-agent stage. Pantheon passes no
-model or effort, so each tool's own config decides, unless a SPEC or an effort level
-sets them. The levels are low (hello's), medium, and max; pantheon agents shows what each
-one gives each tool, and the ollama_models setting names an ollama model for each.
-Pantheon looks for the tools on PATH each time it starts; disable_TOOL = true leaves one
-out. TASK is free text, an issue number (123, or #123 in quotes for bash), or an issue
-URL.
+gemini, ollama); with no -a, a mode takes up to its own number (implement 3, hello 2).
+The agents take the tracks in that order, and the first agent plays each single-agent
+stage, unless the scramble setting gives each stage its own random order. Pantheon
+passes no model or effort, so each tool's own config decides, unless a SPEC or an
+effort level sets them. The levels are low (hello's), medium, high, and max; pantheon
+agents shows what each one gives each tool, and the ollama_models setting names an
+ollama model for each. Pantheon looks for the tools on PATH each time it starts;
+disable_TOOL = true leaves one out. TASK is free text, an issue number (123, or #123 in
+quotes for bash), or an issue URL.
 
 Agents keep your own setup: agent files, skills, MCP servers, and permission rules.
+Pantheon adds only rules that let them run the room's two commands without asking you.
 An ollama agent is claude with the ollama server as its API; if claude keeps an API key
 from a Console login, it sends that key to the server too.
-Pantheon gives each step a short brief, and the agent writes its result to a file that
-ends with a "PANTHEON: <status>" line. Each session has a private tmux server, so agents
-keep running when pantheon exits. Claude and codex report through hooks; gemini reports
-through its window title. Unless it runs from a clone of gregschmit/dotfiles (git updates
-that), pantheon looks on GitHub for a newer version at most every 12 hours.
+Pantheon types each step's instructions straight into its agent, and the agent writes
+its result to a file that ends with a "PANTHEON: <status>" line. The room is the team's
+channel: each agent learns how to read it (pantheon room) and post to it (pantheon say),
+and pantheon gives each post to every other agent, which decides whether it needs to
+act. So an agent can ask the team a question, or wake another agent. You can post too
+(ctrl+s): to answer, or to give a team that is done more work. Pantheon's own lines in
+the room go to no agent. Each session has a private tmux server, so agents keep running
+when pantheon exits. Claude and codex report through hooks; gemini reports through its
+window title. The room names the model each agent really runs, and claude's effort,
+where they differ from what pantheon asked for (gemini's model comes from its chat
+file). Unless it runs from a clone of gregschmit/dotfiles (git updates that), pantheon
+looks on GitHub for a newer version at most every 12 hours.
 
 Files: ~/.local/state/pantheon (or $PANTHEON_HOME) holds config.toml and one sqlite file per
 session, sessions/<slug>.sqlite3. That file is the whole session: its record, its lock,
-the briefs, and the results. Agents read and write plain files, so while they run,
-pantheon also keeps their briefs and results in run/<slug>/, and copies each result into
-the session file.
+the prompts, and the results. Agents write plain files, so while they run, pantheon
+keeps their results in run/<slug>/, and copies each result into the session file.
+pantheon say leaves each post in run/<slug>/posts/ for pantheon to give out.
 """
 
 from __future__ import annotations
@@ -75,6 +88,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import functools
+import glob
 import hashlib
 import hmac
 import http.client
@@ -130,20 +144,23 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-VERSION = "0.2.0"  # raise it with each change: installed copies offer the update
+# Raise version when you want to publish changes; installed copies offer the update.
+VERSION = "0.3.0"
 
 # The UI's colors; None keeps Textual's default. Agents wear their tools' brand colors
 # instead (TOOL_COLORS).
 THEME_PRIMARY = "#4ade80"
 THEME_ACCENT = "#22c55e"
 
-# ---------------------------------------------------------------------------------- roles
+# ---------------------------------------------------------------------- prompts and modes
+
+# Everything pantheon tells the agents, and every mode, so you can change them here.
 
 # A role is a job. Keep these short: the agents' own files and skills do the rest.
 ROLES = {
     "architect": (
-        "You are the architect. Study the task and the code, then write a design the "
-        "engineers can follow. Do not change the code."
+        "You are an architect. Study the task and the code, then write a design an "
+        "engineer can build. Do not change the code."
     ),
     "engineer-implementor": "You are the implementing engineer. Build the design.",
     "engineer-reviewer": (
@@ -158,13 +175,283 @@ ROLES = {
     "greeter": "You are a friendly greeter. Keep it to one or two sentences.",
 }
 
-# ---------------------------------------------------------------------------------- modes
+# The texts pantheon types into agents or prints for them, and the notes a mode ends
+# with: str.format templates. A typed text starts with a letter, since a "/" or "!"
+# there is a command in the tools. It ends in a way no other text does (step_end, or
+# a room id), since pantheon finds a short paste on the screen by its end. An agent's
+# first prompt is header, intro, task, room, earlier (when the room has posts), the
+# step's body, result, and step_end; later ones are header, body, the room's commands,
+# result, and step_end, since the agent keeps its context.
+PROMPTS = {
+    "header": "Pantheon step {step}, for {agent}.",
+    "intro": "{role}\n\nStart in {dir}.",
+    "task": "The task:\n\n{task}",
+    "room": (
+        "The room is where the team talks: the user, pantheon, and every agent. Run "
+        "its two commands exactly as written here, with nothing before them and no "
+        "pipes or redirects, so they run without asking anyone. To read the room "
+        "(this only reads; add --last N to see the last N entries), run:\n\n"
+        "    {room}\n\nTo post to it, run:\n\n    {say} 'your message'\n\n"
+        "Put the message in single quotes, so the shell changes nothing in it, and "
+        "write each ' in it as '\\''. Pantheon gives each post to every other agent "
+        "and to the user. Posts are messages from the team: act on one when it is for "
+        "you. Post a question, a problem, or news that changes someone else's work; do "
+        "not post progress. If you need an answer before you can finish, post your "
+        "question and end your turn: the answer wakes you."
+    ),
+    # Every later prompt repeats the commands, since compaction can drop the first.
+    "commands": (
+        "The room's commands, as before (run them exactly as written, with the "
+        "message in single quotes and each ' in it written as '\\''):\n\n"
+        "    {room}\n    {say} 'your message'"
+    ),
+    "result": (
+        "When you finish, write {write} to {path}, and end the file with this "
+        "line:\n\n{lines}"
+    ),
+    "results": (
+        "When you finish, write {write} to {path}, and end the file with one of these "
+        "lines:\n\n{lines}"
+    ),
+    "step_end": "(End of step {step}.)",
+    "remind": (
+        "You ended your turn before you finished step {step}.\n\n{commands}\n\n"
+        "{result}\n\n(End of reminder #{id}.)"
+    ),
+    "post": (
+        "Room post #{id} from {sender}. Pantheon gives every post to every agent. If "
+        "this one needs something from you, do it, and answer in the room. If not, "
+        "end your turn without doing anything.\n\n{commands}\n\nThe post:\n\n{text}"
+        "\n\n(End of post #{id}.)"
+    ),
+    "user": "the user",  # you, as the agents read your posts
+    # An agent gets only the posts made after it starts, so its first prompt lists the
+    # newest of the earlier ones (EARLIER_POSTS), and says how many it left out.
+    "earlier": "Posts in the room from before you joined, oldest first:\n\n{posts}",
+    "earlier_line": "- {sender}: {text}",
+    "earlier_cut": "({n} older post{s} left out; read the room to see every post)",
+    # What pantheon room prints first when its newest entries fill it.
+    "room_cut": "({n} older entries left out, to keep this short)",
+    # implement
+    "design": (
+        "Write a design for the task that an engineer can build. You are one of {n} "
+        "architects; each writes their own design, and each design gets its own "
+        "engineer and reviewer."
+    ),
+    "design_dirty": (
+        " These files have uncommitted changes, so the engineers' branches will not "
+        "have them: {files}."
+    ),
+    "build": (
+        "Build design {track}, by {architect}. It is in {design}. Work in your own git "
+        "worktree, on a new branch whose name ends in -{key}, from commit {base}, and "
+        "commit your work. In your summary, name the branch and the worktree, and say "
+        "what changed. {reviewer} reviews it next."
+    ),
+    "review": (
+        "Review {engineer}'s build of design {track}. The design is in {design}; the "
+        "engineer's summary, in {summary}, names the branch and the worktree. The "
+        "branch started from commit {base}. Review every change on it, including "
+        "uncommitted files. Approve it if it is good to keep; if not, ask for "
+        "changes, and say exactly what and why."
+    ),
+    "review_again": " Your last review is in {last}.",
+    "fix": (
+        "{reviewer} reviewed your build of design {track} and asked for changes; the "
+        "review is in {review}. The design is in {design}, and your last summary, in "
+        "{summary}, names your branch and worktree. Make the changes on your branch, "
+        "and commit. If you think a change is wrong, you may refuse it: say why in "
+        "your summary, and end it with PANTHEON: refused instead."
+    ),
+    "compare": (
+        "Each design was built on its own branch and reviewed. Here is a line for "
+        "each build, which starts with its key:\n\n{tracks}\n\nCompare the builds "
+        "against the task: read each design, summary, and review, and check out each "
+        "branch. Pick the one to keep, and say what it should take from the others, "
+        "if anything. Then write your report for the user: what the chosen build "
+        "does, how to check it, and which branches and worktrees they can delete. "
+        "Your status is the key of the build you pick, or none if no build is good "
+        "enough."
+    ),
+    "compare_track": (
+        "- {key}: design {track} by {architect} ({design}), built by {engineer} "
+        "(summary: {summary}), reviewed by {reviewer} (last review: {review}): "
+        "{outcome}"
+    ),
+    "approved": "approved in round {round}",
+    "refused": "the engineer refused round {round}'s changes",
+    "unapproved": "not approved after {n} review{s}",
+    "picked": "The project manager picked {key}'s build; its report is above.",
+    "picked_none": "The project manager picked no build; its report is above.",
+    # hello
+    "hello": "Say hello to the other agents, and say which tool and model you are.",
+    "reply": "The others said hello:\n\n{hellos}\n\nReply to them.",
+    "hello_line": "- {agent}: {text}",
+    "said_hello": "Everyone said hello.",
+}
+
+
+def define_modes() -> dict[str, Mode]:
+    # A function, so this section can come before the classes it uses.
+    return {
+        "implement": Mode(
+            help="design the change several ways, build and review each, keep the best",
+            stages={
+                "design": Stage("architect", "your design", team=True),
+                "build": Stage(
+                    "engineer-implementor",
+                    "a short summary of your work (its branch, its worktree, and what "
+                    "changed)",
+                    team=True,
+                    reuse=True,
+                ),
+                "review": Stage(
+                    "engineer-reviewer",
+                    "your review",
+                    ("approved", "changes"),
+                    team=True,
+                    reuse=True,
+                ),
+                "compare": Stage("project-manager", "your comparison and report"),
+            },
+            flow=flow_implement,
+            count=3,
+            approve=(),  # e.g. ("design",) to OK each design before it is built
+        ),
+        "hello": Mode(
+            help="the agents say hello at once, then the first one replies (a quick test)",
+            stages={"hello": Stage("greeter", "your message", team=True, reuse=True)},
+            flow=flow_hello,
+            count=2,
+            effort="low",
+            needs_task=False,
+            needs_git=False,
+            stop_when_done=True,
+        ),
+    }
+
+
+def flow_implement(f: Flow) -> list[Step] | Finish:
+    # Each track: a design, a build, then a review and a fix until the reviewer
+    # approves, the engineer refuses, or max_rounds reviews are done. Then the compare.
+    designs = {r.track: r for r in f.results("design")}
+    if not designs and not f.busy("design"):
+        body = PROMPTS["design"].format(n=len(f.keys))
+        if f.pre_existing:
+            body += PROMPTS["design_dirty"].format(files=name_list(f.pre_existing))
+        return [Step("design", 0, body)]  # no track: one step on each track
+    steps = []
+    for t in f.tracks():
+        if t not in designs or f.busy(track=t):
+            continue
+        design, last = designs[t], f.last_in(t)
+        builds, reviews = f.results("build", t), f.results("review", t)
+        if last.stage == "design":
+            body = PROMPTS["build"].format(
+                track=t,
+                architect=design.agent,
+                design=design.path,
+                key=f.player("build", t),
+                base=f.base,
+                reviewer=f.name("review", t),
+            )
+            steps.append(Step("build", 1, body, track=t))
+        elif last.stage == "build" and last.status == "done":
+            body = PROMPTS["review"].format(
+                engineer=last.agent,
+                track=t,
+                design=design.path,
+                summary=last.path,
+                base=f.base,
+            )
+            if reviews:
+                body += PROMPTS["review_again"].format(last=reviews[-1].path)
+            steps.append(Step("review", len(reviews) + 1, body, track=t))
+        elif last.status == "changes" and len(reviews) < f.max_rounds:
+            body = PROMPTS["fix"].format(
+                reviewer=last.agent,
+                track=t,
+                review=last.path,
+                design=design.path,
+                summary=builds[-1].path,  # a new instance or a compaction lost it
+            )
+            statuses = ("done", "refused")  # the engineer may refuse the changes
+            steps.append(
+                Step("build", len(builds) + 1, body, track=t, statuses=statuses)
+            )
+        # else the track is over: approved, refused, or out of rounds
+    if steps or f.open:
+        return steps
+    pick = f.latest("compare")
+    if pick is None:
+        built = [t for t in f.tracks() if f.results("build", t)]
+        lines = "\n".join(track_line(f, t) for t in built)
+        keys = [f.results("build", t)[-1].key for t in built]
+        body = PROMPTS["compare"].format(tracks=lines)
+        return [Step("compare", 0, body, statuses=(*keys, "none"))]
+    if pick.status == "none":
+        return Finish("done", PROMPTS["picked_none"])
+    return Finish("done", PROMPTS["picked"].format(key=pick.status))
+
+
+def track_line(f: Flow, t: int) -> str:
+    """A track's line in compare's prompt: who did what, and how it ended."""
+    design = f.results("design", t)[-1]
+    build = f.results("build", t)[-1]
+    reviews = f.results("review", t)
+    last = f.last_in(t)
+    if last.status == "approved":
+        outcome = PROMPTS["approved"].format(round=last.round)
+    elif last.status == "refused":
+        outcome = PROMPTS["refused"].format(round=reviews[-1].round)
+    else:
+        n = len(reviews)
+        outcome = PROMPTS["unapproved"].format(n=n, s="" if n == 1 else "s")
+    return PROMPTS["compare_track"].format(
+        key=build.key,
+        track=t,
+        architect=design.agent,
+        design=design.path,
+        engineer=build.agent,
+        summary=build.path,
+        reviewer=reviews[-1].agent,
+        review=reviews[-1].path,
+        outcome=outcome,
+    )
+
+
+def flow_hello(f: Flow) -> list[Step] | Finish:
+    if f.open:
+        return []
+    hellos = f.results("hello")
+    if not hellos:
+        return [Step("hello", 1, PROMPTS["hello"])]  # no track: one on each track
+    if all(r.round == 1 for r in hellos):  # track 1's agent replies to the others
+        others = "\n".join(
+            PROMPTS["hello_line"].format(agent=r.agent, text=quoted(r.text))
+            for r in hellos
+            if r.track != 1
+        )
+        return [Step("hello", 2, PROMPTS["reply"].format(hellos=others), track=1)]
+    return Finish("done", PROMPTS["said_hello"])
+
+
+def quoted(text: str) -> str:
+    """A result's text for a list in a prompt: no PANTHEON line, later lines indented."""
+    lines = [line.rstrip() for line in text.strip().splitlines()]
+    if lines and STATUS_RE.search(lines[-1]):
+        lines.pop()
+    return "\n  ".join(lines).strip()
+
+
+# ----------------------------------------------------------------------- tools and stages
 
 
 # The tools pantheon runs, in the order it picks them: the agents setting's default.
-# -a N takes the first N that can run here, and the first agent plays every
-# single-agent stage. An agent's model and effort come from the tool's own config,
-# unless a SPEC or an effort level sets them.
+# -a N takes the first N that can run here. They take the tracks in that order, and the
+# first plays every single-agent stage, unless the scramble setting shuffles them. An
+# agent's model and effort come from the tool's own config, unless a SPEC or an effort
+# level sets them.
 TOOLS = ("claude", "codex", "gemini", "ollama")  # SPEC: TOOL[:MODEL][@EFFORT]
 
 # Effort levels, for a mode (Mode.effort) or a run (--effort): the (model, effort) each
@@ -183,11 +470,17 @@ EFFORTS = {
         "gemini": ("auto", ""),  # gemini picks flash or pro for each turn
         "ollama": ("", ""),  # models read medium differently, so each keeps its own
     },
+    "high": {
+        "claude": ("", "high"),  # your model
+        "codex": ("", "high"),  # every codex model takes high
+        "gemini": ("pro", ""),  # as at max: nothing lies between auto and pro
+        "ollama": ("", "high"),  # a model without high gets its own default
+    },
     "max": {
         "claude": ("", "max"),  # your model, at its top effort
         "codex": ("", "xhigh"),  # every codex model takes xhigh; older ones lack max
         "gemini": ("pro", ""),  # an account without pro gets a dialog on its first turn
-        "ollama": ("", "max"),  # or the model's own top level, if it lacks max
+        "ollama": ("", "max"),  # a model without max gets its default; gpt-oss: high
     },
 }
 
@@ -206,11 +499,12 @@ class Stage:
     role: str
     write: str  # what the agent writes, e.g. "your design"
     statuses: tuple[str, ...] = ("done",)
-    # Every agent does the stage at once, each in its own worktree on its own branch, so
-    # a later stage can compare their work.
-    multi_agent: bool = False
-    # When the stage runs again for the same agent (another round), send it to the
-    # instance that did it last time. False starts a new instance, free of its bias.
+    # Every agent does the stage, one on each track, so a later stage can compare their
+    # work. The agents take the tracks in the order of -a, or with scramble, in an order
+    # of the stage's own.
+    team: bool = False
+    # When the stage runs again on a track (a later round), send it to the instance that
+    # did it last time. False starts a new instance, free of its bias.
     reuse: bool = False
 
 
@@ -223,149 +517,39 @@ class Step:
     body: str
     agent: str = ""  # a roster key, e.g. codex-2; "" means the stage's own agents
     statuses: tuple[str, ...] = ()  # () means the stage's
+    track: int = 0  # 1 to N; 0 on a team stage means a step on each track
 
 
 @dataclass(frozen=True)
 class Finish:
-    state: str  # done, or waiting (for your decision)
+    state: str  # done
     note: str
-    retry: bool = False  # waiting: "Another round" (one more review) can go on
 
 
 @dataclass(frozen=True)
 class Mode:
     help: str
     stages: dict[str, Stage]
-    flow: Callable[[Flow], Step | Finish]
+    flow: Callable[[Flow], list[Step] | Finish]
+    count: int = 1  # agents with no -a: up to this many that can run here
     effort: str = ""  # an EFFORTS level, or "": each tool's own config
     approve: tuple[str, ...] = ()  # stages whose results wait for your OK
     needs_task: bool = True
     needs_git: bool = True
     stop_when_done: bool = False
-    max_rounds: int = 5  # reviews before the session waits for you
+    max_rounds: int = 5  # reviews on each track
 
     @property
-    def multi_agent(self) -> bool:
-        return any(st.multi_agent for st in self.stages.values())
+    def team(self) -> bool:
+        return any(st.team for st in self.stages.values())
+
+    @property
+    def least(self) -> int:
+        """The fewest agents it runs with: a team needs two."""
+        return 2 if self.team else 1
 
 
-def flow_implement(f: Flow) -> Step | Finish:
-    design = f.latest("design")
-    if design is None:
-        body = "Write a design the engineers can follow."
-        if f.pre_existing:
-            body += (
-                " These files have uncommitted changes, so the engineers' branches will "
-                f"not have them: {name_list(f.pre_existing)}."
-            )
-        return Step("design", 0, body)
-    builds = f.batch("implement", 1)
-    if not builds:
-        return Step("implement", 1, f"Build the design in {design.path}, and commit.")
-    pick = f.latest("compare")
-    if pick is None:
-        summaries = "\n".join(f"- {r.key}: {r.path}" for r in builds)
-        body = (
-            f"The design is in {design.path}. Each engineer built it on their own branch "
-            f"from commit {f.base}. Their summaries say where:\n\n{summaries}\n\n"
-            "Compare the branches, and any uncommitted changes in their worktrees, "
-            "against the task and the design. Pick the one to keep, "
-            "and list what it should take from the others, if anything. Your status is "
-            "the key of the branch you pick, or none if no branch is good enough."
-        )
-        return Step("compare", 0, body, statuses=(*(r.key for r in builds), "none"))
-    if pick.status == "none":
-        return Finish(
-            "waiting", f"The project manager picked no branch; see {pick.path}."
-        )
-    chosen = next(r for r in builds if r.key == pick.status)
-    where = f"the {chosen.key} branch ({chosen.path} says where it is)"
-    last = f.last()
-    reviews = f.results("review")
-    if last.stage == "compare":
-        body = (
-            f"The design is in {design.path}. The project manager picked {where}. Work "
-            f"there: do what the manager's notes in {pick.path} ask, if anything, and "
-            "commit."
-        )
-        return Step("implement", 2, body, agent=chosen.key)
-    if last.stage == "implement":
-        body = (
-            f"Review {where}. The design is in {design.path}, and the engineer's latest "
-            f"summary is in {last.path}. The branch started from commit {f.base}. Review "
-            "every change on it, including uncommitted files."
-        )
-        if reviews:
-            body += f" The last review is in {reviews[-1].path}."
-        return Step("review", len(reviews) + 1, body)
-    if last.stage == "report":
-        return Finish("done", f"The reviewer approved the {chosen.key} branch.")
-    if last.status == "approved":
-        others = "\n".join(
-            f"- {r.key}: {r.path}" for r in builds if r.key != chosen.key
-        )
-        body = (
-            f"The reviewer approved {where}. The project manager's comparison is in "
-            f"{pick.path}, and the other engineers' summaries say where their branches "
-            f"and worktrees are:\n\n{others}\n\nWrite a short report for the user: what "
-            "the chosen branch does, how to check it, and which of the other branches "
-            "and worktrees they can delete."
-        )
-        return Step("report", 0, body)
-    if len(reviews) >= f.max_rounds:
-        n = len(reviews)
-        note = f"No approval after {n} review{'s' if n != 1 else ''}."
-        return Finish("waiting", note, retry=True)
-    body = (
-        f"The design is in {design.path}. The reviewer asked for changes in "
-        f"{last.path}. Make them on {where}, and commit."
-    )
-    return Step("implement", last.round + 2, body, agent=chosen.key)
-
-
-def flow_hello(f: Flow) -> Step | Finish:
-    hellos = f.batch("hello", 1)
-    if not hellos:
-        body = "Say hello to the other agents, and say which tool and model you are."
-        return Step("hello", 1, body)
-    if f.last().round == 1:
-        others = ", ".join(r.path for r in hellos if r.key != f.primary)
-        body = f"The others said hello in {others}. Read them, then reply to them."
-        return Step("hello", 2, body, agent=f.primary)
-    return Finish("done", "Everyone said hello.")
-
-
-MODES = {
-    "implement": Mode(
-        help="design a change, build it several ways at once, keep the best, review it",
-        stages={
-            "design": Stage("architect", "your design"),
-            "implement": Stage(
-                "engineer-implementor",
-                "a short summary of your work (its branch, its worktree, and what changed)",
-                multi_agent=True,
-            ),
-            "compare": Stage("project-manager", "your comparison and pick"),
-            "review": Stage(
-                "engineer-reviewer", "your review", ("approved", "changes")
-            ),
-            "report": Stage("project-manager", "your report"),
-        },
-        flow=flow_implement,
-        approve=(),  # e.g. ("design", "compare") to OK those before the team goes on
-    ),
-    "hello": Mode(
-        help="the agents say hello at once, then the first one replies (a quick test)",
-        stages={
-            "hello": Stage("greeter", "your message", multi_agent=True, reuse=True)
-        },
-        flow=flow_hello,
-        effort="low",
-        needs_task=False,
-        needs_git=False,
-        stop_when_done=True,
-    ),
-}
+MODES = define_modes()
 
 # ------------------------------------------------------------------------------- settings
 
@@ -380,6 +564,7 @@ class Setting:
 SETTINGS = {
     "agents": Setting(TOOLS, "the tools to pick agents from, in order"),
     "yolo": Setting(False, "start agents with permission checks off (-y, --no-yolo)"),
+    "scramble": Setting(False, "give each stage the agents in a new random order"),
     "disable_claude": Setting(False, "keep claude agents out of new sessions"),
     "disable_codex": Setting(False, "keep codex agents out of new sessions"),
     "disable_gemini": Setting(False, "keep gemini agents out of new sessions"),
@@ -395,7 +580,7 @@ SETTINGS = {
 
 # --------------------------------------------------------------------------------- schema
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE session (
@@ -408,6 +593,7 @@ CREATE TABLE session (
     base_commit TEXT NOT NULL DEFAULT '',
     pre_existing TEXT NOT NULL DEFAULT '',  -- files with changes before the session, one per line
     yolo INTEGER NOT NULL DEFAULT 0,
+    scramble INTEGER NOT NULL DEFAULT 0,    -- the scramble setting when the session started
     max_rounds INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL DEFAULT 'running',  -- running, needs_you, waiting, done, stopped, ended
     origin TEXT NOT NULL DEFAULT '',        -- this install's signature; files from elsewhere open read-only
@@ -448,6 +634,9 @@ CREATE TABLE agents (                       -- one per process, made when a stag
     native_id TEXT NOT NULL DEFAULT '',     -- the tool's own session id
     state TEXT NOT NULL DEFAULT 'new',      -- new, starting, working, needs_you, idle, exited
     reason TEXT NOT NULL DEFAULT '',        -- why it needs you
+    heard INTEGER NOT NULL DEFAULT 0,       -- the room id of the last post typed into it
+    posted INTEGER NOT NULL DEFAULT 0,      -- it posted since pantheon typed it a step
+    answering INTEGER NOT NULL DEFAULT 0,   -- its turn is for a room post
     started_at TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT ''
 ) STRICT;
@@ -456,13 +645,14 @@ CREATE TABLE steps (
     id INTEGER PRIMARY KEY,
     agent_id INTEGER NOT NULL REFERENCES agents(id),
     stage TEXT NOT NULL DEFAULT '',
-    round INTEGER NOT NULL DEFAULT 0,       -- steps with the same stage and round are a batch
+    round INTEGER NOT NULL DEFAULT 0,
+    track INTEGER NOT NULL DEFAULT 0,       -- 1 to N on a team stage; 0: none
     name TEXT NOT NULL DEFAULT '',          -- the result's file name, e.g. 01-design-claude.md
-    brief TEXT NOT NULL DEFAULT '',         -- what the agent was asked to do
+    brief TEXT NOT NULL DEFAULT '',         -- the prompt: what the agent was asked to do
     result TEXT NOT NULL DEFAULT '',        -- what it wrote: the step's artifact
     statuses TEXT NOT NULL DEFAULT '',      -- allowed statuses, space separated
     status TEXT NOT NULL DEFAULT 'open',    -- open, or the status the result ends with
-    sent INTEGER NOT NULL DEFAULT 0,        -- the brief reached the agent
+    sent INTEGER NOT NULL DEFAULT 0,        -- the prompt reached the agent
     gate INTEGER NOT NULL DEFAULT 0,        -- the result waits for your OK
     approved INTEGER NOT NULL DEFAULT 0,
     started_at TEXT NOT NULL DEFAULT '',
@@ -479,7 +669,7 @@ CREATE TABLE events (                       -- the room, plus hook summaries (ki
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL DEFAULT '',
     agent_id INTEGER REFERENCES agents(id), -- NULL: pantheon or you
-    kind TEXT NOT NULL DEFAULT '',          -- note, start, result, needs, approve, waiting, done, error, hook
+    kind TEXT NOT NULL DEFAULT '',          -- note, start, prompt, say, ran, result, needs, approve, done, error, hook
     text TEXT NOT NULL DEFAULT '',
     data TEXT NOT NULL DEFAULT '{}'
 ) STRICT;
@@ -487,12 +677,27 @@ CREATE TABLE events (                       -- the room, plus hook summaries (ki
 
 # ---------------------------------------------------------------------------------- tools
 
-# Text that shows an agent's input box is on screen. Pantheon types only when it is.
+# Text that shows an agent's input box (codex's and gemini's: an empty one); pantheon
+# types only when it shows. No dialog shows codex's or gemini's. Claude's ❯ also marks a
+# dialog's chosen row, so a claude agent gets no text before its first hook
+# (SessionStart), which comes after its startup dialogs.
 INPUT_MARKERS = {
-    "claude": "❯",
-    "codex": "›",
-    "gemini": "Type your message",
-    "ollama": "❯",
+    "claude": ("❯",),
+    "codex": ("Ask Codex to do anything", "Ask a follow-up question"),
+    "gemini": ("Type your message",),
+    "ollama": ("❯",),
+}
+
+# What a tool shows in its input box for a long paste (see collapses), as matched on a
+# screen with TYPED_NOISE_RE's spaces and box edges taken out.
+CLAUDE_PASTED = (
+    r"\[Pastedtext#\d+(?:\+\d+lines)?\]|\[\.\.\.Truncatedtext#\d+\+\d+lines\.\.\.\]"
+)
+PASTED_RE = {
+    "claude": re.compile(CLAUDE_PASTED),
+    "codex": re.compile(r"\[PastedContent\d+chars\](?:#\d+)?"),
+    "gemini": re.compile(r"\[PastedText:\d+(?:lines|chars)(?:#\d+)?\]"),
+    "ollama": re.compile(CLAUDE_PASTED),
 }
 
 # Claude and codex hooks run this to add the hook's JSON to the session file.
@@ -514,6 +719,7 @@ CLAUDE_HOOK_EVENTS = (
     "Stop",
     "StopFailure",
     "SessionEnd",
+    "PostModelSwitch",  # never PreModelSwitch: a hook there holds up the switch
 )
 CLAUDE_NEEDS_NOTICES = {
     "permission_prompt",
@@ -535,7 +741,10 @@ STARTUP_TIMEOUT = (
     20  # seconds without a first signal: a startup dialog is likely waiting
 )
 QUIET_TIMEOUT = 60  # seconds without output while working (codex and gemini)
+PASTE_TIMEOUT = 3  # seconds for a paste to show in the input box; else a dialog took it
+SUBMIT_TIMEOUT = 10  # seconds after Enter for the agent's turn to start
 LOCK_STALE = 30  # seconds without a heartbeat before a session lock counts as free
+TMUX_LIMIT = 16364  # bytes in one tmux command: new-session and all its arguments
 
 TMUX_CONF = """\
 # Written by pantheon. Agents run in this private server; `tmux attach` is transport.
@@ -627,8 +836,16 @@ def model_args(tool: str, model: str, effort: str) -> list[str]:
     )
 
 
+def prompt_args(tool: str, text: str) -> list[str]:
+    """The arguments that give a tool its first prompt. Gemini's -i would read a text
+    that starts with "-" as a flag."""
+    if tool == "gemini":
+        return [f"--prompt-interactive={text}"]
+    return ["--", text]
+
+
 def launch_claude(
-    s: Session, a: AgentRun, first: str, route: dict | None = None
+    s: Session, a: AgentRun, route: dict | None = None
 ) -> tuple[list[str], dict]:
     # A settings file's env (user, project, local) beats the env claude starts with, and
     # claude applies --settings after those files (only managed settings come later). So
@@ -638,13 +855,17 @@ def launch_claude(
     if a.effort or a.tool == "ollama":
         values["CLAUDE_CODE_EFFORT_LEVEL"] = a.effort or "auto"  # auto: not your effort
     settings = claude_settings()
+    # The room's commands run without asking you, with any arguments; your deny and ask
+    # rules still win. In yolo too, where they do no harm.
+    room = [room_command(s.slug), say_command(s.slug, a.name)]
+    settings["permissions"] = {"allow": [f"Bash({c} *)" for c in room]}
     if values:
         settings["env"] = values
     if route:  # "": no apiKeyHelper, whose key claude would send this host as X-Api-Key
         settings["apiKeyHelper"] = ""
     text = json.dumps(settings)
     if route:  # it can hold a real token, which must not show in ps
-        file = Path(s.scratch) / f".{a.name}.settings.json"
+        file = claude_settings_file(s.slug, a.name)
         write_private(file, text)
         text = str(file)
     argv = [tool_path("claude"), "--session-id", a.native_id]
@@ -657,7 +878,27 @@ def launch_claude(
     if claude_fullscreen():
         # Otherwise a claude stopped in its first 10 s counts as a failed fullscreen start.
         env["CLAUDE_CODE_NO_FLICKER"] = "1"
-    return [*argv, "--", first], env
+    return argv, env
+
+
+def claude_settings_file(slug: str, agent: str) -> Path:
+    # Outside run/<slug>, which agents can write to: it holds the room's allow rules,
+    # and an ollama agent's token.
+    return RUN / f"{slug}.{agent}.claude-settings.json"
+
+
+def claude_sends_no_effort(a: AgentRun, workdir: str) -> bool:
+    """Whether CLAUDE_CODE_EFFORT_LEVEL comes to auto or unset for a claude agent, so
+    claude sends no effort, though its hooks say high."""
+    var = "CLAUDE_CODE_EFFORT_LEVEL"
+    managed, *files = [
+        text_of(dig(read_jsonc(path), "env", var))
+        for path in claude_settings_files(workdir)
+    ]
+    ours = a.effort or ("auto" if a.tool == "ollama" else "")  # what launch_claude sets
+    # Managed settings beat pantheon's --settings, which beats your files and your shell.
+    order = (managed, ours, *files, clean_env().get(var, ""))
+    return next((v for v in order if v), "").lower() in ("auto", "unset")
 
 
 def codex_writable_roots() -> list[str]:
@@ -674,7 +915,9 @@ def codex_writable_roots() -> list[str]:
     return [str(home / os.path.expanduser(r)) for r in roots if isinstance(r, str)]
 
 
-def launch_codex(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]:
+def launch_codex(s: Session, a: AgentRun) -> tuple[list[str], dict]:
+    # The room's commands need no rule here: in a folder you trust, codex runs them in
+    # its sandbox without asking (only its rules files could change what it asks).
     argv = [tool_path("codex"), "--no-daemon", "-C", s.workdir]
     # --add-dir would quit in a folder you have not trusted yet (codex runs it
     # read-only); these roots wait until you trust it. -c replaces your own list, so
@@ -688,10 +931,10 @@ def launch_codex(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]:
     argv += model_args("codex", a.model, a.effort)
     if s.yolo:
         argv.append("--dangerously-bypass-approvals-and-sandbox")
-    return [*argv, "--", first], {}
+    return argv, {}
 
 
-def launch_gemini(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]:
+def launch_gemini(s: Session, a: AgentRun) -> tuple[list[str], dict]:
     # Gemini 0.64 reads injected settings only from root-owned files, so it gets no hooks;
     # pantheon follows its window title instead. No --skip-trust: gemini asks you once per
     # repo before it loads the repo's .gemini settings.
@@ -700,7 +943,80 @@ def launch_gemini(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]
     argv += model_args("gemini", a.model, a.effort)
     if s.yolo:
         argv += ["--approval-mode", "yolo"]
-    return [*argv, "-i", first], {}
+    # The room's commands run without asking you; in yolo too, since gemini turns yolo
+    # off in a folder you have not trusted. A --policy flag replaces your own policy
+    # paths, so they go too. Never --allowed-tools: it denies every other shell command,
+    # even in yolo.
+    policy = gemini_policy(s.slug)
+    write_private(policy, gemini_rules(s.slug))
+    for path in [str(policy), *gemini_policy_paths()]:
+        argv += ["--policy", path]
+    return argv, {}
+
+
+def gemini_policy(slug: str) -> Path:
+    # Outside run/<slug>, which agents can write to.
+    return RUN / f"{slug}.gemini-policy.toml"
+
+
+def gemini_rules(slug: str) -> str:
+    """A gemini policy that runs the room's commands without asking. Priority 320 beats
+    the denies gemini adds for a tools.allowed or tools.core list in your settings, but
+    not your tools.exclude, your confirmationRequired, or an admin's policy."""
+    rule = '[[rule]]\ntoolName = "run_shell_command"\ncommandPrefix = {}\n'
+    rule += 'decision = "allow"\npriority = 320\n'
+    # say with any --from, so one file serves each gemini agent in the session
+    say = shlex.join(agent_command(slug, "say"))
+    return "\n".join(rule.format(toml_value(c)) for c in (room_command(slug), say))
+
+
+def gemini_policy_paths() -> list[str]:
+    """The policy paths gemini would read without --policy: policyPaths in your
+    settings, else its own policies dir. Gemini expands a ~ in them itself."""
+    paths = read_jsonc(gemini_home() / "settings.json").get("policyPaths")
+    if not isinstance(paths, list):
+        paths = []
+    paths = [p for p in paths if isinstance(p, str) and p]
+    return paths or [str(gemini_home() / "policies")]
+
+
+def gemini_model(native_id: str) -> str:
+    """The model of gemini's last reply in a session, from the chat file it keeps, or "".
+    With -m auto, gemini picks the model again for each prompt."""
+    home, pattern = gemini_home(), f"tmp/*/chats/session-*-{native_id[:8]}.jsonl"
+    # gemini in its macOS sandbox cannot write ~/.gemini, so it keeps them in ~/.cache.
+    sandboxed = home.parent / ".cache" / ".gemini"
+    files = []
+    for f in [*home.glob(pattern), *sandboxed.glob(pattern)]:
+        try:  # the name has only 8 characters of the id; the first line has all of it
+            with f.open(encoding="utf-8") as fh:
+                if json.loads(fh.readline()).get("sessionId") == native_id:
+                    files.append((f.stat().st_mtime, f))
+        except (OSError, ValueError, AttributeError):
+            continue
+    if not files:
+        return ""
+    try:  # the newest: gemini can start a second file for the same session
+        with max(files)[1].open("rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - 1_000_000))  # its last reply is near the end
+            lines = fh.read().splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        if b'"model"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:  # the first line, cut by the seek, or one being written
+            continue
+        if not isinstance(rec, dict) or rec.get("type") != "gemini":
+            continue
+        model = rec.get("model")
+        # "auto" means its router failed, so the line names no real model.
+        if isinstance(model, str) and model and not model.startswith("auto"):
+            return model
+    return ""
 
 
 # claude's provider switches. It reads "" as unset, so neither your shell nor your
@@ -716,7 +1032,7 @@ CLAUDE_PROVIDERS = (
 )
 
 
-def launch_ollama(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]:
+def launch_ollama(s: Session, a: AgentRun) -> tuple[list[str], dict]:
     model = a.model  # resolve_roster fills it in from ollama_models or ollama_model
     token_env = setting(s.cfg, "ollama_token_env")
     route = {
@@ -734,7 +1050,7 @@ def launch_ollama(s: Session, a: AgentRun, first: str) -> tuple[list[str], dict]
         "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(setting(s.cfg, "ollama_context")),
         "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
     }
-    return launch_claude(s, a, first, route)
+    return launch_claude(s, a, route)
 
 
 LAUNCHERS = {
@@ -843,6 +1159,15 @@ WORD_RE = re.compile(r"[a-z][a-z0-9-]*")  # agent keys and statuses: parts of na
 STAGE_RE = re.compile(r"[a-z](?:[a-z-]*[a-z])?")
 ANSI_RE = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]")
 TYPED_NOISE_RE = re.compile(r"[\s│┃┆┊╎╏|]+")  # wrapping and box edges in an input box
+# ESC above all: an ESC[201~ in a paste ends it early. And lone surrogates, which UTF-8
+# cannot hold.
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\ud800-\udfff]")
+# An image path that ends a line, or comes before " /": claude attaches the image and
+# changes the text around it.
+CLAUDE_IMAGE_RE = re.compile(
+    r"""(['"]?)([^\s`'"]+\.(?:png|jpe?g|gif|webp))\1(?=[ \t]*$|[ \t]+/)""",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def private_dir(path: Path) -> None:
@@ -859,9 +1184,41 @@ def private_dir(path: Path) -> None:
         os.chmod(path, 0o700)
 
 
-def typed_count(screen: str, text: str) -> int:
-    """How often text shows on screen, ignoring wrapping and input-box edges."""
-    return TYPED_NOISE_RE.sub("", screen).count(TYPED_NOISE_RE.sub("", text))
+def clean_instructions(text: str, tool: str) -> str:
+    """text as pantheon gives it to a tool, typed or on its command line: as plain text
+    to the tool, with nothing in it that the tool would act on."""
+    text = CONTROL_RE.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
+    if tool == "gemini":  # gemini's own escapeAtSymbols: "@path" would add a file
+        text = re.sub(r"(?<!\\)@", r"\\@", text)
+    if tool in ("claude", "ollama"):
+        text = CLAUDE_IMAGE_RE.sub(lambda m: f"`{m[2]}`", text)
+    # One newline at the end: tmux keeps a last ";", gemini keeps Enter after a last
+    # "\", and Enter cannot take a completion the text's last word opened.
+    return text.strip("\n") + "\n"
+
+
+def collapses(tool: str, text: str) -> bool:
+    """Whether the tool shows a paste of text as a placeholder in its input box."""
+    units = len(text.encode("utf-16-le")) // 2  # how JavaScript counts a string
+    if tool in ("claude", "ollama"):  # claude counts a tab as 4 spaces
+        return units + 3 * text.count("\t") > 800 or text.count("\n") > 2
+    if tool == "codex":
+        return len(text) > 1000
+    return len(text.split("\n")) > 5 or units > 500  # gemini
+
+
+def paste_shown(tool: str, before: str, after: str, text: str) -> bool:
+    """Whether a paste of text shows on screen: the tool's placeholder shows more often
+    than before, or, for a text that shows as text, its end does. The end, since a box
+    can scroll its start out of view."""
+    b, a = TYPED_NOISE_RE.sub("", before), TYPED_NOISE_RE.sub("", after)
+    pasted = PASTED_RE[tool]
+    if len(pasted.findall(a)) > len(pasted.findall(b)):
+        return True
+    if collapses(tool, text):
+        return False  # a long text shows only as a placeholder, never as its end
+    tail = TYPED_NOISE_RE.sub("", text)[-60:]
+    return bool(tail) and a.count(tail) > b.count(tail)
 
 
 def last_lines(screen: str, n: int = 8) -> str:
@@ -1597,14 +1954,12 @@ def shown_flags(tool: str, model: str, effort: str) -> str:
 
 
 def stage_players(mode: Mode, roster: list, picks: dict[str, str]) -> dict[str, list]:
-    """The stages each agent starts with (a flow may later hand a stage to the agent
-    whose work it kept)."""
+    """The agents that play each stage, track by track, before any scramble."""
     keys = [r[0] for r in roster if r[4]]
-    plays: dict[str, list] = {r[0]: [] for r in roster}
-    for stage, st in mode.stages.items():
-        for key in keys if st.multi_agent else [picks.get(stage, keys[0])]:
-            plays[key].append(stage)
-    return plays
+    return {
+        stage: keys if st.team else [picks.get(stage, keys[0])]
+        for stage, st in mode.stages.items()
+    }
 
 
 def cmd_agents(cfg: dict, args) -> None:
@@ -1630,10 +1985,16 @@ def cmd_agents(cfg: dict, args) -> None:
             print(f"pantheon: {title}: {e}")
             continue
         print(f"pantheon: {title}")
-        plays = stage_players(mode, roster, picks)
+        for stage, keys in stage_players(mode, roster, picks).items():
+            each = " (one on each track)" if mode.stages[stage].team else ""
+            print(f"  {stage:<10} {', '.join(keys)}{each}")
+        if setting(cfg, "scramble"):
+            print(
+                "  (scramble is on: a session gives each stage these agents in a random "
+                "order, which comes from the session's name)"
+            )
         for key, tool, model, effort, _ in roster:
-            print(f"  {key:<10} plays {', '.join(plays[key])}")
-            print(f"  {'':<10} passes {shown_flags(tool, model, effort)}")
+            print(f"  {key:<10} passes {shown_flags(tool, model, effort)}")
             given_parts = {"model": model, "effort": effort}
             left = [
                 f"{part} {how}"
@@ -1697,15 +2058,16 @@ def scratch_dir(slug: str) -> Path:
     return RUN / slug
 
 
-def db_uri(path: Path, create: bool = False) -> str:
-    return f"file:{urllib.parse.quote(os.path.realpath(path))}?mode={'rwc' if create else 'rw'}"
+def db_uri(path: Path, mode: str = "rw") -> str:
+    # mode: rw; rwc, which can create the file; or ro, which only reads.
+    return f"file:{urllib.parse.quote(os.path.realpath(path))}?mode={mode}"
 
 
-def connect(path: Path, create: bool = False) -> sqlite3.Connection:
+def connect(path: Path, mode: str = "rw") -> sqlite3.Connection:
     # isolation_level=None: autocommit, so no read transaction stays open between polls.
     # The default rollback journal keeps a closed session in this one file.
     db = sqlite3.connect(
-        db_uri(path, create), uri=True, timeout=10.0, isolation_level=None
+        db_uri(path, mode), uri=True, timeout=10.0, isolation_level=None
     )
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
@@ -1777,13 +2139,15 @@ def tab_id(slug: str) -> str:
     return "tab-" + view_id(slug)
 
 
-def session_holder(slug: str) -> int:
+def session_holder(path: Path) -> int:
     try:
-        db = connect(db_path(slug))
+        db = connect(path)
     except sqlite3.Error:
         return 0
     try:
         return lock_holder(db)
+    except sqlite3.Error:  # not a session, or a crashed one a sandbox cannot repair
+        return 0
     finally:
         db.close()
 
@@ -1845,8 +2209,11 @@ def spec_text(tool: str, model: str, effort: str) -> str:
     return tool + (f":{model}" if model else "") + (f"@{effort}" if effort else "")
 
 
-def default_count(mode: Mode) -> int:
-    return 2 if mode.multi_agent else 1
+def count_help(mode: Mode) -> str:
+    """How many agents a mode takes with no -a, for its help."""
+    if mode.count == mode.least:
+        return str(mode.count)
+    return f"up to {mode.count}, at least {mode.least}"
 
 
 def effort_arg(text: str | None) -> str | None:
@@ -1883,7 +2250,9 @@ def resolve_roster(
     notes: list[str] = []
     text = agents.strip()
     if not text or text.isdecimal():
-        n = int(text) if text else default_count(mode)
+        # -a N needs N. With no -a, up to the mode's count will do, down to its least.
+        n = int(text) if text else mode.count
+        least = n if text else mode.least
         pool = setting(cfg, "agents")
         specs, skipped = [], []
         for tool in pool:  # the first n that can run here, in order
@@ -1898,15 +2267,20 @@ def resolve_roster(
                 skipped.append(f"{tool}: {why}")
             else:
                 specs.append(tool)
-        if n and len(specs) < n:
+        if n and len(specs) < least:
             why = f" Skipped: {'; '.join(skipped)}." if skipped else ""
-            again = ",".join(specs[i % len(specs)] for i in range(n)) if specs else ""
+            again = (
+                ",".join(specs[i % len(specs)] for i in range(least)) if specs else ""
+            )
             hint = (
-                f" To run {n} anyway, give the agents (-a) as {again}" if again else ""
+                f" To run {least} anyway, give the agents (-a) as {again}"
+                if again
+                else ""
             )
             raise PrepError(
-                f"this needs {n} agent{'s' if n != 1 else ''} that can run here, and "
-                f"the agents setting ({', '.join(pool)}) has {len(specs)}.{why}{hint}"
+                f"this needs {least} agent{'s' if least != 1 else ''} that can run "
+                f"here, and the agents setting ({', '.join(pool)}) has {len(specs)}."
+                f"{why}{hint}"
             )
         if skipped:
             notes.append(f"skipped, since they cannot run here: {'; '.join(skipped)}")
@@ -1916,9 +2290,10 @@ def resolve_roster(
         raise PrepError(f"-a takes a number above 0 or a list of SPECs, not {agents!r}")
     for spec in specs:
         parse_spec(spec)  # a bad SPEC says more than a count would
-    if len(specs) < 2 and mode.multi_agent:
+    if len(specs) < mode.least:
         raise PrepError(
-            f"{mode_name} has a multi-agent stage, so it needs 2 or more agents"
+            f"{mode_name} has a stage that every agent plays, so it needs "
+            f"{mode.least} or more agents"
         )
     roster: list[tuple[str, str, str, str, int]] = []
 
@@ -1963,7 +2338,7 @@ def resolve_roster(
 
     for spec in specs:
         add(spec, True)
-    singles = [name for name, st in mode.stages.items() if not st.multi_agent]
+    singles = [name for name, st in mode.stages.items() if not st.team]
     stage_keys: dict[str, str] = {}
     for item in picks:
         stage, sep, spec = (x.strip() for x in item.partition("="))
@@ -2121,7 +2496,6 @@ def prepare(
 ) -> tuple[str, list[str]]:
     """Check the start dir, read the task, pick the agents, and write the session file."""
     mode = MODES[req.mode]
-    multi = mode.multi_agent
     workdir = os.path.realpath(os.path.expanduser(req.dir or "."))
     if not os.path.isdir(workdir):
         raise PrepError(f"{req.dir} is not a directory")
@@ -2138,9 +2512,9 @@ def prepare(
         base = out.strip()
         pre_existing = dirty_files(workdir)
         note = (
-            "Multi-agent stages build from the last commit, so their branches will not "
-            "have these changes. The other agents start here and see them."
-            if multi
+            "The team's branches start from the last commit, so they will not have "
+            "these changes. The agents that work in the start dir see them."
+            if mode.team
             else "The agents will see these changes too."
         )
         if pre_existing and not confirm(pre_existing, note):
@@ -2164,7 +2538,9 @@ def prepare(
     if mode.needs_task and not task:
         raise PrepError(f"{req.mode} needs a task")
     slug = make_slug(first_line(title, 60) if title else req.mode)
-    db = connect(db_path(slug), create=True)
+    # A copy of the setting: changing it later must not reshuffle a running session.
+    scramble = bool(setting(cfg, "scramble"))
+    db = connect(db_path(slug), "rwc")
     try:
         db.executescript(
             f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
@@ -2172,8 +2548,8 @@ def prepare(
         now = now_iso()
         db.execute(
             "INSERT INTO session (id, slug, mode, task, source, dir, base_commit, pre_existing,"
-            " yolo, max_rounds, state, origin, created_at, updated_at)"
-            " VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)",
+            " yolo, scramble, max_rounds, state, origin, created_at, updated_at)"
+            " VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)",
             (
                 slug,
                 req.mode,
@@ -2183,6 +2559,7 @@ def prepare(
                 base,
                 "\n".join(pre_existing),
                 int(req.yolo),
+                int(scramble),
                 mode.max_rounds,
                 session_origin(slug, now),
                 now,
@@ -2206,6 +2583,7 @@ def prepare(
         if source:
             opening += f" for {source}"
         opening += " with " + ", ".join(specs[r[0]] for r in roster if r[4])
+        opening += ", in a random order for each stage" if scramble else ""
         opening += "".join(f"; {stage}: {specs[key]}" for stage, key in picks.items())
         level = effort_level(mode, req.effort)
         opening += f" (effort {level})" if level else ""
@@ -2229,70 +2607,93 @@ def git_summary(workdir: str, base: str) -> str:
     return text + (f"\n\n{status.rstrip()}" if status.strip() else "")
 
 
-# ---------------------------------------------------------------------------------- flows
+# ----------------------------------------------------------- flow view and agent commands
 
 
 @dataclass
 class StepRecord:
     stage: str
     round: int
+    track: int  # 1 to N on a team stage; 0: none
     key: str  # the agent's roster key, e.g. codex-2
-    agent: str  # the agent's name, e.g. implement2-codex-2
-    status: str
+    agent: str  # the agent's name, e.g. build2-codex-2
+    status: str  # open, or the status its result ends with
     path: str  # the result file, which later agents read
     text: str
 
 
+@dataclass
 class Flow:
-    """What a flow function sees: the session and its finished steps, oldest first."""
+    """What a flow function sees: the session and its steps, oldest first. Pantheon
+    asks the flow again while steps are open, so a flow returns only steps that are
+    neither open nor done: it checks busy() and results()."""
 
-    def __init__(self, task, workdir, base, pre_existing, max_rounds, keys, done):
-        self.task, self.dir, self.base = task, workdir, base
-        self.pre_existing, self.max_rounds, self.done = pre_existing, max_rounds, done
-        self.keys = keys  # the agents from -a, in order
-        self.primary = keys[0]
+    task: str
+    dir: str
+    base: str  # the commit the session started from, or "" outside git
+    pre_existing: list[str]  # files with uncommitted changes when it started
+    max_rounds: int
+    keys: list[str]  # the agents from -a, in order
+    done: list[StepRecord]
+    open: list[StepRecord]  # with no result yet
+    orders: dict[str, list[str]]  # each stage's agents, track by track
 
-    def last(self) -> StepRecord | None:
-        return self.done[-1] if self.done else None
+    @property
+    def primary(self) -> str:
+        return self.keys[0]
+
+    def tracks(self) -> range:
+        return range(1, len(self.keys) + 1)
+
+    def results(self, stage: str, track: int | None = None) -> list[StepRecord]:
+        return [r for r in self.done if r.stage == stage and track in (None, r.track)]
 
     def latest(self, stage: str) -> StepRecord | None:
         return next((r for r in reversed(self.done) if r.stage == stage), None)
 
-    def results(self, stage: str) -> list[StepRecord]:
-        return [r for r in self.done if r.stage == stage]
+    def last_in(self, track: int) -> StepRecord | None:
+        """The track's newest result, of any stage."""
+        return next((r for r in reversed(self.done) if r.track == track), None)
 
-    def batch(self, stage: str, round: int) -> list[StepRecord]:
-        return [r for r in self.results(stage) if r.round == round]
-
-
-def brief_intro(role: str, workdir: str, task: str) -> str:
-    # "Start in": outside a multi-agent stage, a branch or worktree is the agent's call.
-    parts = [ROLES[role], f"Start in {workdir}."]
-    if task:
-        parts.append("The task:\n\n" + task)
-    return "\n\n".join(parts)
-
-
-def multi_agent_note(n: int, base: str, key: str) -> str:
-    note = f"This is a multi-agent stage: {n} agents do this step at the same time."
-    if base:  # a git session; the key keeps two agents of one tool off one branch
-        note += (
-            " Work in your own git worktree, on a new branch whose name ends in "
-            f"-{key}, from commit {base}, and name both in your result."
+    def busy(self, stage: str | None = None, track: int | None = None) -> bool:
+        """Whether an open step matches."""
+        return any(
+            stage in (None, r.stage) and track in (None, r.track) for r in self.open
         )
-    return note
+
+    def player(self, stage: str, track: int) -> str:
+        """The key that plays a track of a stage."""
+        return self.orders[stage][track - 1]
+
+    def name(self, stage: str, track: int) -> str:
+        return f"{stage}-{self.player(stage, track)}"
 
 
-def render_brief(
-    parts: list[str], write: str, result: str, statuses: tuple[str, ...]
-) -> str:
-    if len(statuses) == 1:
-        finish = f"End the file with this line:\n\nPANTHEON: {statuses[0]}"
-    else:
-        lines = "\n".join(f"PANTHEON: {s}" for s in statuses)
-        finish = f"End the file with one of these lines:\n\n{lines}"
-    text = "\n\n".join(p for p in parts if p)
-    return f"{text}\n\nWrite {write} to {result}. {finish}\n"
+def result_lines(write: str, path: str, statuses) -> str:
+    """The end of a prompt: where the result goes, and the line it ends with."""
+    lines = "\n".join(f"PANTHEON: {s}" for s in statuses)
+    key = "result" if len(statuses) == 1 else "results"
+    return PROMPTS[key].format(write=write, path=path, lines=lines)
+
+
+def agent_command(slug: str, command: str) -> list[str]:
+    """A pantheon command as an agent runs it: pantheon's own python (the uv shebang
+    fails in codex's sandbox) on this file, with the session file's path, since codex
+    may drop PANTHEON_HOME from the agent's environment. The prompts, claude's rules,
+    and gemini's policy all use this text."""
+    path = os.path.realpath(db_path(slug))
+    return [sys.executable, "-I", "-B", str(program_path()), command, path]
+
+
+def room_command(slug: str) -> str:
+    """What an agent runs to read the room."""
+    return shlex.join(agent_command(slug, "room"))
+
+
+def say_command(slug: str, agent: str) -> str:
+    """What an agent runs to post to the room, with its name, since codex may drop
+    PANTHEON_AGENT too."""
+    return shlex.join([*agent_command(slug, "say"), "--from", agent])
 
 
 STATUS_RE = re.compile(r"PANTHEON:\s*([A-Za-z][A-Za-z0-9-]*)", re.I)
@@ -2358,9 +2759,22 @@ def pane(agent: str) -> str:
     return f"={agent}:"
 
 
+def tmux_arg(arg: str) -> str:
+    """arg as tmux must get it: tmux reads a ";" at the end of any argument as the end
+    of its command, but reads "\\;" there as a ";"."""
+    return arg[:-1] + "\\;" if arg.endswith(";") else arg
+
+
 def tmux_conf(slug: str) -> Path:
     # Outside run/<slug>, which agents can write to.
     return RUN / f"{slug}.tmux.conf"
+
+
+def private_files(slug: str) -> list[Path]:
+    """The files a session keeps beside run/<slug>: its tmux conf, gemini's policy,
+    and each ollama agent's claude settings."""
+    settings = RUN.glob(glob.escape(slug) + ".*.claude-settings.json")
+    return [tmux_conf(slug), gemini_policy(slug), *settings]
 
 
 def tmux_name(slug: str) -> str:
@@ -2381,7 +2795,8 @@ def signal_group(pid: int, sig: int) -> bool:
 
 def stop_server_sync(slug: str) -> None:
     tmux = Tmux(tmux_path(), tmux_name(slug), os.devnull, clean_env())
-    tmux_conf(slug).unlink(missing_ok=True)
+    for path in private_files(slug):
+        path.unlink(missing_ok=True)
     pids = [
         int(p)
         for p, _, dead in (
@@ -2405,6 +2820,40 @@ def stop_server_sync(slug: str) -> None:
 
 
 @dataclass
+class Outgoing:
+    """A text pantheon will type into an agent."""
+
+    text: str
+    kind: str  # step (a step's prompt), remind, or post (a room post)
+    step_id: int = 0  # for step and remind
+    event_id: int = 0  # for post: its room event
+
+
+@dataclass
+class Paste:
+    """A text pantheon pasted into an agent, until a turn it started is seen. Kept
+    so that pantheon never pastes a text twice into one input box."""
+
+    item: Outgoing  # the head of the outbox until Enter
+    text: str  # what went in: item.text, cleaned for the tool
+    before: str  # the screen before the paste
+    at: float  # when pantheon pasted it
+    missed: bool = False  # it did not show in time: a dialog may have taken it
+    looked: bool = False  # you went into the agent since the paste
+    shown: bool = False  # it showed in the input box while you were in
+    entered: float = 0.0  # when pantheon pressed Enter
+    again: bool = False  # pantheon pressed Enter a second time
+
+
+# An idle agent's reason when it asked the room and ended its turn with no result: a
+# post wakes it. Not "needs you", since another agent may answer.
+ROOM_WAIT = "waiting for the room"
+
+# The most posts from before an agent joined that its first prompt lists: the newest.
+EARLIER_POSTS = 20
+
+
+@dataclass
 class AgentRun:
     id: int
     name: str
@@ -2421,12 +2870,16 @@ class AgentRun:
     typeable: bool = False  # it needs you, but pantheon may still type to it
     saw_work: bool = False  # gemini showed its working title since its last turn ended
     in_turn: bool = False  # from a prompt to its Stop: tool hooks count only then
+    ran: tuple[str, str] = ("", "")  # the model and effort it reports, as last known
     last_message: str = ""
-    # (text, step id, or None for a reminder) to type once the agent is idle
-    outbox: list = field(default_factory=list)
-    blocked_screen: str = (
-        ""  # the screen when typing last failed; retry once it changes
-    )
+    # What to type once the agent is idle, oldest first. A reopen rebuilds it from the
+    # file, in room order: the unsent step, and the posts after heard.
+    outbox: list[Outgoing] = field(default_factory=list)
+    pasting: Paste | None = None
+    heard: int = 0  # the room id of the last post typed into it
+    posted: bool = False  # it posted to the room since pantheon typed it a step
+    answering: bool = False  # its turn is for a room post: any answer goes in the room
+    hooked: bool = False  # a hook came from it: claude sends none until its dialogs end
     waiting_since: float = 0.0
     waiting_noted: bool = False
     stage: str = ""  # the stage it plays
@@ -2462,6 +2915,9 @@ def compact_hook(ev: dict) -> dict:
         "error",
         "source",
         "model",
+        "to_model",
+        "effort",
+        "agent_id",
     )
     out = {k: ev[k] for k in keep if k in ev}
     if isinstance(ev.get("last_assistant_message"), str):
@@ -2480,7 +2936,7 @@ class Session:
         try:
             row = self.check_file()
             # A session file from another install opens read-only: its start dir, yolo
-            # flag, and briefs come from whoever wrote it.
+            # flag, and prompts come from whoever wrote it.
             origin = session_origin(row["slug"], row["created_at"])
             self.foreign = not hmac.compare_digest(row["origin"], origin)
             if not self.foreign:
@@ -2492,6 +2948,7 @@ class Session:
         self.task, self.workdir, self.base = row["task"], row["dir"], row["base_commit"]
         self.pre_existing = [line for line in row["pre_existing"].splitlines() if line]
         self.yolo, self.max_rounds = bool(row["yolo"]), row["max_rounds"]
+        self.scramble = bool(row["scramble"])
         self.state = row["state"]
         self.roster = {
             r["key"]: r for r in self.db.execute("SELECT * FROM roster ORDER BY id")
@@ -2511,6 +2968,9 @@ class Session:
                 r["native_id"],
                 r["state"],
                 r["reason"],
+                heard=r["heard"],
+                posted=bool(r["posted"]),
+                answering=bool(r["answering"]),
                 stage=r["stage"],
                 key=r["key"],
             )
@@ -2521,7 +2981,7 @@ class Session:
         conf = tmux_conf(slug)
         if not self.foreign:
             private_dir(scratch_dir(slug))
-            private_dir(scratch_dir(slug) / "briefs")
+            private_dir(scratch_dir(slug) / "posts")
             write_private(conf, TMUX_CONF)
         self.scratch = os.path.realpath(scratch_dir(slug))
         if not self.foreign:
@@ -2588,6 +3048,21 @@ class Session:
             ).fetchone()
             data = json.loads(row["data"]) if row else {}
             a.typeable = bool(data.get("typeable") or data.get("remind"))
+        row = self.db.execute(
+            "SELECT data FROM events WHERE agent_id = ? AND kind = 'ran'"
+            " ORDER BY id DESC LIMIT 1",
+            (a.id,),
+        ).fetchone()
+        if row:  # so a reopen does not name the model again
+            data = json.loads(row["data"])
+            a.ran = (data.get("model", ""), data.get("effort", ""))
+        a.hooked = (
+            self.db.execute(
+                "SELECT 1 FROM events WHERE agent_id = ? AND kind = 'hook' LIMIT 1",
+                (a.id,),
+            ).fetchone()
+            is not None
+        )
         # The file keeps no turn. A wait pantheon may type through, or a StopFailure's,
         # comes after one.
         a.in_turn = a.state == "working" or (
@@ -2595,6 +3070,35 @@ class Session:
             and not a.typeable
             and not a.reason.startswith("error: ")
         )
+        if a.state in ("new", "exited"):
+            return
+        # What was not typed into it yet, in room order: each post after heard but its
+        # own, and its step (unless the session stopped) ahead of the posts made after
+        # its prompt. Launch sets heard to the newest post, so a first prompt (its role,
+        # the task, and the room) goes before every post.
+        rows = self.db.execute(
+            "SELECT id, text, data FROM events WHERE kind = 'say' AND id > ?"
+            " AND agent_id IS NOT ? ORDER BY id",
+            (a.heard, a.id),
+        )
+        for r in rows:
+            sender = json.loads(r["data"]).get("from", "you")
+            a.outbox.append(self.post_item(a, r["id"], sender, r["text"]))
+        step = self.db.execute(
+            "SELECT id, brief FROM steps WHERE agent_id = ? AND status = 'open'"
+            " AND sent = 0",
+            (a.id,),
+        ).fetchone()
+        if step is None or self.state not in ("running", "needs_you", "waiting"):
+            return
+        prompt = self.db.execute(
+            "SELECT id FROM events WHERE kind = 'prompt' AND agent_id = ?"
+            " AND json_extract(data, '$.step') = ?",
+            (a.id, step["id"]),
+        ).fetchone()
+        at = prompt["id"] if prompt else 0
+        i = sum(o.event_id < at for o in a.outbox)  # the posts made before it
+        a.outbox.insert(i, Outgoing(step["brief"], "step", step["id"]))
 
     # -- records
 
@@ -2604,8 +3108,8 @@ class Session:
         text: str,
         agent: AgentRun | None = None,
         data: dict | None = None,
-    ):
-        self.db.execute(
+    ) -> int:
+        cur = self.db.execute(
             "INSERT INTO events (at, agent_id, kind, text, data) VALUES (?, ?, ?, ?, ?)",
             (
                 now_iso(),
@@ -2615,6 +3119,7 @@ class Session:
                 json.dumps(data or {}),
             ),
         )
+        return cur.lastrowid  # its room id
 
     def save_agent(self, a: AgentRun, **fields) -> None:
         for k, v in fields.items():
@@ -2673,9 +3178,6 @@ class Session:
     def result_path(self, step) -> str:
         return os.path.join(self.scratch, step["name"])
 
-    def brief_path(self, step) -> str:
-        return os.path.join(self.scratch, "briefs", step["name"])
-
     def result_of(self, step) -> tuple[str, str, str | None]:
         """The step's status, the problem with its result file, and the file's text."""
         path = self.result_path(step)
@@ -2684,23 +3186,25 @@ class Session:
         return status, problem, text
 
     def materialize(self) -> None:
-        """Write the briefs and results agents read, when the scratch dir lacks them."""
-        for step in self.db.execute("SELECT * FROM steps WHERE name != ''"):
-            for path, text in (
-                (self.brief_path(step), step["brief"]),
-                (self.result_path(step), step["result"]),
-            ):
-                if text and not os.path.lexists(path):
-                    write_private(Path(path), text)
+        """Write the results agents read, when the scratch dir lacks them."""
+        for step in self.db.execute("SELECT * FROM steps WHERE result != ''"):
+            path = self.result_path(step)
+            if step["name"] and not os.path.lexists(path):
+                write_private(Path(path), step["result"])
 
     def step_label(self) -> tuple[AgentRun | None, str]:
-        """The agent and step under way, or for a batch, no agent and its progress."""
+        """The agent and step under way; for a batch, no agent and its progress; for
+        steps of different stages or rounds, how many are open."""
         rows = self.db.execute(
             "SELECT * FROM steps WHERE status = 'open' ORDER BY id"
         ).fetchall()
         if not rows:
             return None, ""
         step = rows[0]
+        if any(
+            (r["stage"], r["round"]) != (step["stage"], step["round"]) for r in rows
+        ):
+            return None, f"{len(rows)} steps open"
         label = step["stage"] + (f" round {step['round']}" if step["round"] else "")
         total = self.db.execute(
             "SELECT COUNT(*) FROM steps WHERE stage = ? AND round = ?",
@@ -2712,6 +3216,13 @@ class Session:
 
     def live_agents(self) -> list[AgentRun]:
         return [a for a in self.agents.values() if a.state not in ("new", "exited")]
+
+    def asks(self) -> int:
+        """How much waits on you: agents that need you, or that wait for an answer in
+        the room, and a result that waits for your OK."""
+        agents = self.agents.values()
+        n = sum(a.state == "needs_you" or a.reason == ROOM_WAIT for a in agents)
+        return n + (self.state == "waiting")
 
     # -- the loop
 
@@ -2747,6 +3258,7 @@ class Session:
             while self.db.execute("SELECT 1 FROM hooks LIMIT 1").fetchone():
                 self.read_hooks()
             await self.check_server()
+        self.read_posts()  # first: an agent posts before its turn ends
         self.read_hooks()
         if now - self.last_poll >= 0.5:
             self.last_poll = now
@@ -2805,14 +3317,20 @@ class Session:
     def on_hook(self, a: AgentRun, ev: dict) -> None:
         name = ev.get("hook_event_name", "")
         self.event("hook", name, a, compact_hook(ev))
+        a.hooked = True
         if a.state == "exited":
             return
+        # A subagent's hooks, or those of a thread of the tool's own (codex's memories),
+        # have no transcript of the agent's: they name another model and effort.
+        if not ev.get("agent_id") and ev.get("transcript_path"):
+            self.hook_ran(a, name, ev)
         if name == "SessionStart":
             if a.tool == "codex" and ev.get("session_id") and not a.native_id:
                 self.save_agent(a, native_id=ev["session_id"])
         elif name == "UserPromptSubmit":
             a.in_turn = True
             self.set_state(a, "working")
+            self.turn_started(a, str(ev.get("prompt", "")))
         elif name in ("PostToolBatch", "PostToolUse"):
             # Claude can send one after its Stop; it must not undo the turn's end.
             if a.in_turn:
@@ -2843,38 +3361,114 @@ class Session:
             a.in_turn = False
             self.needs_you(a, f"error: {ev.get('error', 'unknown')}")
 
+    def hook_ran(self, a: AgentRun, name: str, ev: dict) -> None:
+        """The model and effort an agent really runs, from one of its own hooks. Every
+        codex hook names its model; claude names it at SessionStart and PostModelSwitch,
+        and its effort in its tool hooks and at Stop."""
+        model = ev.get("to_model" if name == "PostModelSwitch" else "model")
+        if name == "SessionStart" and ev.get("source") == "compact":
+            model = None  # a subagent's compaction sends its model, with no agent_id
+        effort = ev.get("effort")
+        level = effort.get("level") if isinstance(effort, dict) else None
+        if level == "high" and claude_sends_no_effort(a, self.workdir):
+            level = None
+        self.note_ran(a, model, level)
+
+    def note_ran(self, a: AgentRun, model=None, effort=None) -> None:
+        """Name in the room the model and effort an agent really runs: once each is
+        known, unless it is what pantheon asked for, and again each time it changes."""
+        old_model, old_effort = a.ran
+        if isinstance(model, str) and model:
+            a.ran = (model, a.ran[1])
+        if isinstance(effort, str) and effort:
+            a.ran = (a.ran[0], effort)
+        new_model, new_effort = a.ran
+        data = {"model": new_model, "effort": new_effort}
+        if new_model != old_model and (old_model or new_model != a.model):
+            text = ("now runs " if old_model else "runs ") + new_model
+            self.event("ran", text, a, data)
+        if new_effort != old_effort and (old_effort or new_effort != a.effort):
+            text = ("now runs" if old_effort else "runs") + f" at effort {new_effort}"
+            self.event("ran", text, a, data)
+
     def on_title(self, a: AgentRun, title: str) -> None:
         glyph = title.strip()[:1]
         if glyph in GEMINI_WORKING:
             a.saw_work = True
             self.set_state(a, "working")
+            self.turn_started(a, "")
         elif glyph == "✋":
             a.saw_work = True
+            self.turn_started(a, "")
             self.needs_you(a, "action required")
         elif glyph == "◇" and a.saw_work:  # gemini shows ◇ at startup too
             a.saw_work = False
+            self.note_ran(a, gemini_model(a.native_id))  # before the step's result
             self.turn_ended(a)
 
+    def turn_started(self, a: AgentRun, prompt: str) -> None:
+        """A turn started, so a paste that this turn took is done. A turn that
+        pantheon's Enter did not start is yours, by transport, and you may have entered
+        a text pantheon pasted, even before a reopen. Claude's and codex's hooks give
+        the prompt, which then has the text's first line (it names the step or the
+        post). Gemini's give none, so its turn counts as your Enter only if the paste
+        showed in its input box while you were in. Another turn (one you queued, or a
+        background task's) leaves the paste in the box, for check_paste to enter."""
+        p, a.pasting = a.pasting, None
+        if p is not None and p.entered:
+            return
+        if prompt:  # claude and codex
+            # Its reply is for you, unless you entered a post.
+            self.save_agent(a, answering=False)
+            item = next(
+                (
+                    o
+                    for o in a.outbox
+                    if clean_instructions(o.text, a.tool).split("\n", 1)[0] in prompt
+                ),
+                None,
+            )
+        else:  # gemini
+            item = p.item if p is not None and p.shown else None
+        if item is not None:
+            a.outbox = [o for o in a.outbox if o is not item]
+            self.delivered(a, item)
+        if p is not None and item is not p.item:
+            a.pasting = p  # it waits in the box until the agent is idle again
+
     def turn_ended(self, a: AgentRun) -> None:
+        answering = a.answering
+        self.save_agent(a, answering=False)
         step = self.open_step(a, sent_only=True)
-        if step is None:  # a turn you started by transport
+        if step is None:  # a turn that a room post, or you by transport, started
             self.set_state(a, "idle")
-            if a.last_message:
+            # An answer to a post goes in the room by say; a reply to you, here.
+            if a.last_message and not answering:
                 self.event("note", "replied:\n" + a.last_message.strip(), a)
             return
         status, problem, text = self.result_of(step)
         if problem:
-            self.needs_you(a, problem, remind=True)
+            self.read_posts()  # a post from this turn may wait in posts/ still
+            # Only an agent with no result may wait for an answer: a result with a
+            # wrong or missing PANTHEON line means it thinks it is done.
+            if text is not None or not a.posted:
+                self.needs_you(a, problem, remind=True)
+                return
+            # It asked the room, and the post that answers wakes it. Not "needs you",
+            # since another agent may answer, so no Remind.
+            if a.reason != ROOM_WAIT:
+                self.event("note", "waits for an answer in the room", a)
+            self.set_state(a, "idle", ROOM_WAIT)
             return
         gate = int(step["stage"] in self.mode.approve)
         self.db.execute(
             "UPDATE steps SET status = ?, result = ?, gate = ?, ended_at = ? WHERE id = ?",
             (status, text, gate, now_iso(), step["id"]),
         )
-        a.outbox = [item for item in a.outbox if item[1] is not None]  # stale reminders
+        a.outbox = [o for o in a.outbox if o.kind != "remind"]  # stale reminders
         self.set_state(a, "idle")
         self.event("result", step["name"], a, {"step": step["id"], "status": status})
-        if gate:  # advance() waits for you once the whole batch is done
+        if gate:  # advance() waits for your OK before it asks the flow again
             self.event(
                 "approve", f"{step['name']} waits for your OK.", a, {"step": step["id"]}
             )
@@ -2918,11 +3512,15 @@ class Session:
             return
         step = self.open_step(a, sent_only=True)
         if step is not None and self.result_of(step)[0]:
+            if a.tool == "gemini":  # it exited before its ◇ title could end the turn
+                self.note_ran(a, gemini_model(a.native_id))
             self.turn_ended(a)  # it wrote its result first (gemini has no hooks)
         self.save_agent(a, state="exited", reason="")
         note = "exited" + (f" with status {status}" if status else "")
         self.event("note", note + (f":\n{tail}" if tail else ""), a)
-        if self.open_step(a) is not None and self.state in ("running", "needs_you"):
+        # A gate's wait counts too: the other tracks' steps go on while it waits.
+        going = self.state in ("running", "needs_you", "waiting")
+        if self.open_step(a) is not None and going:
             self.set_session_state("stopped")
             self.event(
                 "error", f"{a.name} exited during its step, so the session stopped."
@@ -2936,8 +3534,13 @@ class Session:
                 and a.launched
                 and now - a.launched > STARTUP_TIMEOUT
             ):
+                # A first prompt that waits in the outbox still goes once its input
+                # box shows.
+                queued = any(o.kind == "step" for o in a.outbox)
                 self.needs_you(
-                    a, "no response since it started; a startup dialog may be waiting"
+                    a,
+                    "no response since it started; a startup dialog may be waiting",
+                    typeable=queued,
                 )
             elif (
                 a.state == "working"
@@ -2949,31 +3552,95 @@ class Session:
                     a, "no output for a minute; it may be stuck, or its turn failed"
                 )
 
+    # -- the room
+
+    def read_posts(self) -> None:
+        """Post what pantheon say left in posts/, oldest first. Agents write files, not
+        the session file, since codex's sandbox cannot write that."""
+        folder = os.path.join(self.scratch, "posts")
+        try:
+            st = os.lstat(folder)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+                return  # an agent put something else there
+            names = sorted(n for n in os.listdir(folder) if n.endswith(".json"))
+        except OSError:
+            return
+        for name in names:
+            path = os.path.join(folder, name)
+            raw = b""
+            try:  # never follow a link, nor wait on a pipe, that an agent put here
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, "rb") as f:
+                    if stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                        raw = f.read(1_000_000)
+            except OSError:
+                pass
+            try:
+                os.unlink(path)
+            except OSError:
+                continue  # a post that stays would go out on every tick
+            try:
+                post = json.loads(raw)
+                sender, text = str(post["from"]), post["text"].strip()
+                # A lone surrogate (bad UTF-8 given to say) cannot go in the session file.
+                text = text.encode("utf-8", "replace").decode()
+            except (ValueError, TypeError, KeyError, AttributeError):
+                sender, text = "", ""
+            if not text:
+                self.event("error", f"could not read the room post {name}")
+                continue
+            self.post(sender if NAME_RE.fullmatch(sender) else "someone", text)
+
+    def post(self, sender: str, text: str) -> None:
+        """Put a post in the room, and give it to every other agent that runs, which
+        decides whether it needs to act. sender: an agent's name, or you."""
+        a = self.agents.get(sender)
+        event_id = self.event("say", text, a, {"from": sender})
+        if a is not None:
+            self.save_agent(a, posted=True)
+        others = [b for b in self.live_agents() if b is not a]
+        for b in others:
+            b.outbox.append(self.post_item(b, event_id, sender, text))
+        if not others:
+            self.event("note", "No other agent runs now, so none got this post.")
+
+    def post_item(self, a: AgentRun, event_id: int, sender: str, text: str) -> Outgoing:
+        """Room post event_id as pantheon types it into agent a."""
+        author = PROMPTS["user"] if sender == "you" else sender
+        message = PROMPTS["post"].format(
+            id=event_id, sender=author, text=text, commands=self.commands(a)
+        )
+        return Outgoing(message, "post", event_id=event_id)
+
     # -- driving the agents
 
     async def advance(self) -> None:
         if self.state not in ("running", "needs_you"):
             return
-        steps = self.db.execute(
-            "SELECT * FROM steps WHERE status = 'open' ORDER BY id"
+        unsent = self.db.execute(
+            "SELECT * FROM steps WHERE status = 'open' AND sent = 0 ORDER BY id"
         ).fetchall()
-        if steps:
-            for step in steps:
-                if not step["sent"] and self.state in ("running", "needs_you"):
-                    await self.dispatch(step)
-            return
+        for step in unsent:
+            if self.state in ("running", "needs_you"):
+                await self.dispatch(step)
+        # Gates stay global: a result that waits for your OK holds every track.
         if self.db.execute(
             "SELECT 1 FROM steps WHERE gate = 1 AND approved = 0"
         ).fetchone():
             self.set_session_state("waiting")
             return
+        if self.state not in ("running", "needs_you"):  # a dispatch stopped it
+            return
+        # Asked on each tick, so each track goes on as soon as its last step is done.
         nxt = self.mode.flow(self.flow_view())
         if isinstance(nxt, Finish):
-            await self.finish(nxt)
+            if self.open_step() is None:  # the steps under way end first
+                await self.finish(nxt)
             return
-        for step in self.create_steps(nxt):
-            if self.state in ("running", "needs_you"):
-                await self.dispatch(step)
+        for step in nxt:
+            for row in self.create_steps(step):
+                if self.state in ("running", "needs_you"):
+                    await self.dispatch(row)
         while self.replaced:
             await self.retire(self.replaced.pop())
 
@@ -2991,15 +3658,19 @@ class Session:
         self.event("note", "stopped: a new instance took over", a)
 
     def flow_view(self) -> Flow:
+        # A result that waits for your OK is neither open nor done, so it is left out.
+        # Asked on each tick, so only what a StepRecord holds: no prompts.
         rows = self.db.execute(
-            "SELECT s.*, a.name AS agent_name, a.key AS agent_key FROM steps s"
+            "SELECT s.stage, s.round, s.track, s.status, s.name, s.result,"
+            " a.name AS agent_name, a.key AS agent_key FROM steps s"
             " JOIN agents a ON a.id = s.agent_id"
-            " WHERE s.status != 'open' AND (s.gate = 0 OR s.approved = 1) ORDER BY s.id"
+            " WHERE s.gate = 0 OR s.approved = 1 ORDER BY s.id"
         )
-        done = [
+        records = [
             StepRecord(
                 r["stage"],
                 r["round"],
+                r["track"],
                 r["agent_key"],
                 r["agent_name"],
                 r["status"],
@@ -3015,24 +3686,43 @@ class Session:
             self.pre_existing,
             self.max_rounds,
             self.keys,
-            done,
+            [r for r in records if r.status != "open"],
+            [r for r in records if r.status == "open"],
+            {stage: self.order(stage) for stage in self.mode.stages},
         )
 
-    def step_keys(self, step: Step) -> list[str]:
-        """Who does a step: --agent's pick, else the flow's, else the stage's own."""
+    def order(self, stage: str) -> list[str]:
+        """A stage's agents, track by track: -a's order, or with scramble, an order of
+        the stage's own. It comes from a hash, so it is the same each time the session
+        opens, in any Python."""
+        if not self.scramble:
+            return list(self.keys)
+        return sorted(
+            self.keys,
+            key=lambda k: hashlib.sha256(f"{self.slug}:{stage}:{k}".encode()).digest(),
+        )
+
+    def step_keys(self, step: Step) -> list[tuple[str, int]]:
+        """Who does a step, on which track: --agent's pick, else the flow's, else the
+        stage's own. A team stage's step with no track goes to every track."""
         if step.stage in self.picks:
-            return [self.picks[step.stage]]
+            return [(self.picks[step.stage], step.track)]
         if step.agent:
             if step.agent not in self.roster:
                 raise ValueError(
                     f"the flow asked for an agent this session lacks: {step.agent}"
                 )
-            return [step.agent]
-        return (
-            list(self.keys)
-            if self.mode.stages[step.stage].multi_agent
-            else self.keys[:1]
-        )
+            return [(step.agent, step.track)]
+        order = self.order(step.stage)
+        if not 0 <= step.track <= len(order):
+            raise ValueError(
+                f"the flow asked for a track this session lacks: {step.track}"
+            )
+        if not self.mode.stages[step.stage].team:
+            return [(order[0], step.track)]
+        if step.track:
+            return [(order[step.track - 1], step.track)]
+        return [(key, track) for track, key in enumerate(order, 1)]
 
     def agent_for(self, stage: str, key: str) -> AgentRun:
         """The agent to play stage for key: the last one if the stage reuses, else new."""
@@ -3067,69 +3757,95 @@ class Session:
         return a
 
     def create_steps(self, step: Step) -> list:
-        """One step per agent that does it; a multi-agent stage makes a batch."""
+        """One step for each agent that does it. Each gets its prompt, which goes in
+        the room too."""
         st = self.mode.stages[step.stage]
-        keys = self.step_keys(step)
         statuses = step.statuses or st.statuses
         rows = []
-        for key in keys:
-            note = multi_agent_note(len(keys), self.base, key) if len(keys) > 1 else ""
+        for key, track in self.step_keys(step):
             a = self.agent_for(step.stage, key)
             first = not self.db.execute(
                 "SELECT 1 FROM steps WHERE agent_id = ?", (a.id,)
             ).fetchone()
             cur = self.db.execute(
-                "INSERT INTO steps (agent_id, stage, round, statuses, started_at) VALUES (?, ?, ?, ?, ?)",
-                (a.id, step.stage, step.round, " ".join(statuses), now_iso()),
+                "INSERT INTO steps (agent_id, stage, round, track, statuses, started_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (a.id, step.stage, step.round, track, " ".join(statuses), now_iso()),
             )
             step_id = cur.lastrowid
             rnd = f"-{step.round}" if step.round else ""
             name = f"{step_id:02d}-{step.stage}{rnd}-{key}.md"
-            intro = brief_intro(st.role, self.workdir, self.task) if first else ""
-            brief = render_brief(
-                [intro, step.body, note],
-                st.write,
-                os.path.join(self.scratch, name),
-                statuses,
-            )
+            parts = [PROMPTS["header"].format(step=step_id, agent=a.name)]
+            if first:  # an agent keeps its context, so these go once
+                parts += self.intro(a)
+            parts.append(step.body)
+            if not first:
+                parts.append(self.commands(a))
+            path = os.path.join(self.scratch, name)
+            parts.append(result_lines(st.write, path, statuses))
+            parts.append(PROMPTS["step_end"].format(step=step_id))
+            prompt = "\n\n".join(p for p in parts if p) + "\n"
             self.db.execute(
                 "UPDATE steps SET name = ?, brief = ? WHERE id = ?",
-                (name, brief, step_id),
+                (name, prompt, step_id),
             )
-            row = self.step(step_id)
-            # Agents can write in the scratch dir, so refuse a link one put in place of
-            # briefs/, and replace (never follow) a link at the brief's own path.
-            private_dir(Path(self.scratch) / "briefs")
-            write_private(Path(self.brief_path(row)), brief)
-            self.event(
-                "note",
-                f"started {step.stage}"
-                + (f" round {step.round}" if step.round else ""),
-                a,
-            )
-            rows.append(row)
+            self.event("prompt", prompt, a, {"step": step_id})
+            rows.append(self.step(step_id))
         return rows
+
+    def intro(self, a: AgentRun) -> list[str]:
+        """What an agent's first prompt starts with: its role, the task, the room, and
+        the posts made before it joined, since it gets only the later ones."""
+        parts = [PROMPTS["intro"].format(role=ROLES[a.role], dir=self.workdir)]
+        if self.task:
+            parts.append(PROMPTS["task"].format(task=self.task))
+        room, say = room_command(self.slug), say_command(self.slug, a.name)
+        parts.append(PROMPTS["room"].format(room=room, say=say))
+        rows = self.db.execute(
+            "SELECT text, data FROM events WHERE kind = 'say' ORDER BY id"
+        ).fetchall()
+        if not rows:
+            return parts
+        lines = []
+        older = len(rows) - EARLIER_POSTS
+        if older > 0:
+            s = "" if older == 1 else "s"
+            lines.append(PROMPTS["earlier_cut"].format(n=older, s=s))
+        for r in rows[-EARLIER_POSTS:]:
+            sender = json.loads(r["data"]).get("from", "you")
+            author = PROMPTS["user"] if sender == "you" else sender
+            text = "\n  ".join(r["text"].strip().splitlines())
+            lines.append(PROMPTS["earlier_line"].format(sender=author, text=text))
+        parts.append(PROMPTS["earlier"].format(posts="\n".join(lines)))
+        return parts
+
+    def commands(self, a: AgentRun) -> str:
+        room, say = room_command(self.slug), say_command(self.slug, a.name)
+        return PROMPTS["commands"].format(room=room, say=say)
 
     async def dispatch(self, step) -> None:
         a = self.agent_by_id(step["agent_id"])
-        pointer = f"Read {self.brief_path(step)} and do what it says."
         if a is None or a.state == "exited":
             self.set_session_state("stopped")
             self.event(
                 "error", "The agent for the next step is gone, so the session stopped."
             )
             return
-        if a.state == "new":
-            if a.name not in self.launch_failed and await self.launch(a, pointer):
-                self.db.execute("UPDATE steps SET sent = 1 WHERE id = ?", (step["id"],))
-        elif all(sid != step["id"] for _, sid in a.outbox):
-            a.outbox.append((pointer, step["id"]))
+        if any(o.kind == "step" and o.step_id == step["id"] for o in a.outbox):
+            return  # it waits to be typed
+        item = Outgoing(step["brief"], "step", step["id"])
+        if a.state != "new":
+            a.outbox.append(item)
+        elif a.name not in self.launch_failed:
+            await self.launch(a, item)
 
-    async def launch(self, a: AgentRun, first: str) -> bool:
+    async def launch(self, a: AgentRun, first: Outgoing) -> bool:
+        """Start an agent. Its first prompt goes in its command line when the whole tmux
+        command fits; else it waits in the outbox until the agent shows its input box."""
         try:
             if a.tool != "codex" and not a.native_id:  # codex's hook reports its own
                 self.save_agent(a, native_id=str(uuid.uuid4()))
-            argv, env = LAUNCHERS[a.tool](self, a, first)
+            argv, env = LAUNCHERS[a.tool](self, a)
             # tmux starts a pane even when the program is missing, and the pane just dies.
             exe = next((x for x in argv if os.path.isabs(x)), "")
             if exe and not os.access(exe, os.X_OK):
@@ -3147,7 +3863,12 @@ class Session:
             cmd += ["-c", start_dir]
             for k, v in env.items():
                 cmd += ["-e", f"{k}={v}"]
-            await self.tmux.run(*cmd, *argv)
+            cmd = [tmux_arg(x) for x in [*cmd, *argv]]
+            text = clean_instructions(first.text, a.tool)
+            prompt = [tmux_arg(x) for x in prompt_args(a.tool, text)]
+            # Measured here, since past the limit tmux fails with one of two messages.
+            in_argv = sum(len(x.encode()) + 1 for x in cmd + prompt) <= TMUX_LIMIT
+            await self.tmux.run(*cmd, *(prompt if in_argv else []))
         except (TmuxError, OSError, KeyError) as e:
             # The step stays unsent, so reopening the session after a fix tries again.
             self.launch_failed.add(a.name)
@@ -3157,86 +3878,168 @@ class Session:
                 a,
             )
             return False
-        self.save_agent(a, state="starting", reason="", started_at=now_iso())
+        # It gets the posts from now on; its first prompt has the older ones.
+        newest = self.db.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM events WHERE kind = 'say'"
+        ).fetchone()[0]
+        self.save_agent(
+            a, state="starting", reason="", started_at=now_iso(), heard=newest
+        )
         a.launched = time.time()
         spec = spec_text(a.tool, a.model, a.effort)
         self.event("start", f"joined ({spec}) from {short_home(exe)}", a)
+        if in_argv:
+            self.delivered(a, first)
+        else:
+            a.outbox.append(first)
         return True
 
+    def delivered(self, a: AgentRun, item: Outgoing) -> None:
+        """The agent has item now, typed or in its command line."""
+        self.save_agent(a, answering=item.kind == "post")
+        if item.kind == "post":  # a reopen does not type it again
+            self.save_agent(a, heard=item.event_id)
+        if item.kind != "step":
+            return
+        self.db.execute("UPDATE steps SET sent = 1 WHERE id = ?", (item.step_id,))
+        self.save_agent(a, posted=False)  # it posts about this step from now on
+
+    def can_type(self, a: AgentRun, item: Outgoing) -> bool:
+        """Whether pantheon may type item into the agent now."""
+        if a.tool in ("claude", "ollama") and not a.hooked:
+            return False  # its ❯ may mark a row in a startup dialog
+        if a.state == "idle" or (a.state == "needs_you" and a.typeable):
+            return True
+        # A first prompt too long for the command line goes once the input box shows.
+        return (
+            a.state == "starting"
+            and item.kind == "step"
+            and self.open_step(a, sent_only=True) is None
+        )
+
     async def send_pending(self, now: float) -> None:
+        """Type each agent's next text: paste it, press Enter on a later tick once it
+        shows, then watch for the turn it starts. Nothing here waits, so ticks stay
+        short."""
         for a in list(self.agents.values()):
-            if not a.outbox or self.attached == a.name:
+            p = a.pasting
+            if self.attached == a.name:  # never type into an agent you are in
+                if p is not None and not p.entered:
+                    p.looked = True
+                    # Kept once seen: your Enter empties the box before gemini's title
+                    # shows the turn.
+                    if not p.shown:
+                        screen = await self.tmux.run(
+                            "capture-pane", "-p", "-J", "-t", pane(a.name), check=False
+                        )
+                        p.shown = paste_shown(a.tool, p.before, screen, p.text)
                 continue
-            if not (a.state == "idle" or (a.state == "needs_you" and a.typeable)):
-                continue
-            text, step_id = a.outbox[0]
-            if step_id is None and self.open_step(a, sent_only=True) is None:
-                a.outbox.pop(0)  # a reminder whose step is done
-                continue
-            target = pane(a.name)
-            screen = await self.tmux.run(
-                "capture-pane", "-p", "-J", "-t", target, check=False
-            )
-            if a.blocked_screen and screen == a.blocked_screen:
-                continue  # typing failed on this screen; wait for it to change
-            if INPUT_MARKERS[a.tool] not in screen:
-                # Never press Enter on an unknown screen: some dialogs default to "No, exit".
-                a.waiting_since = a.waiting_since or now
-                if now - a.waiting_since > 15 and not a.waiting_noted:
-                    a.waiting_noted = True
-                    self.event(
-                        "note", "waiting for its input box to show before typing", a
-                    )
-                continue
-            a.waiting_since, a.waiting_noted = 0.0, False
-            # A scroll during transport can leave tmux in copy mode, where Enter only
-            # ends copy mode.
-            mode = await self.tmux.run(
-                "display-message", "-p", "-t", target, "#{pane_in_mode}", check=False
-            )
-            if mode.strip() == "1":
-                await self.tmux.run(
-                    "send-keys", "-t", target, "-X", "cancel", check=False
+            if p is not None and p.entered:
+                await self.check_turn(a, p, now)
+            elif p is not None:
+                await self.check_paste(a, p, now)
+            elif a.outbox:
+                await self.paste(a, now)
+
+    async def paste(self, a: AgentRun, now: float) -> None:
+        """Paste the agent's next text, once its input box shows."""
+        item = a.outbox[0]
+        if item.kind == "remind":
+            step = self.step(item.step_id)
+            if step is None or step["status"] != "open":
+                a.outbox.pop(0)  # its step is done
+                return
+        if not self.can_type(a, item):
+            return
+        target = pane(a.name)
+        screen = await self.tmux.run(
+            "capture-pane", "-p", "-J", "-t", target, check=False
+        )
+        if not any(m in screen for m in INPUT_MARKERS[a.tool]):
+            # Never type on an unknown screen: a dialog would take the text, and some
+            # take Enter as "No, exit".
+            a.waiting_since = a.waiting_since or now
+            if now - a.waiting_since > 15 and not a.waiting_noted:
+                a.waiting_noted = True
+                self.event(
+                    "note", "waiting for its empty input box to show before typing", a
                 )
-            before = typed_count(screen, text)
-            buffer = f"pantheon-{a.name}"
-            await self.tmux.run("load-buffer", "-b", buffer, "-", data=text.encode())
-            await self.tmux.run(
-                "paste-buffer", "-p", "-r", "-d", "-b", buffer, "-t", target
-            )
-            await asyncio.sleep(
-                0.3
-            )  # codex reads an Enter right after a paste as a newline
-            shown = await self.tmux.run(
-                "capture-pane", "-p", "-J", "-t", target, check=False
-            )
-            if typed_count(shown, text) <= before:
-                # The paste missed the input box: a dialog (such as codex's rate-limit
-                # picker) took it, and would take Enter as a choice.
-                a.blocked_screen = shown
-                self.needs_you(
-                    a,
-                    "a dialog is open on its screen; transport to answer it",
-                    typeable=True,
-                )
-                continue
+            return
+        a.waiting_since, a.waiting_noted = 0.0, False
+        # A scroll during transport can leave tmux in copy mode, where Enter only ends
+        # copy mode.
+        mode = await self.tmux.run(
+            "display-message", "-p", "-t", target, "#{pane_in_mode}", check=False
+        )
+        if mode.strip() == "1":
+            await self.tmux.run("send-keys", "-t", target, "-X", "cancel", check=False)
+        text = clean_instructions(item.text, a.tool)
+        buffer = f"pantheon-{a.name}"
+        await self.tmux.run("load-buffer", "-b", buffer, "-", data=text.encode())
+        await self.tmux.run(
+            "paste-buffer", "-p", "-r", "-d", "-b", buffer, "-t", target
+        )
+        a.pasting = Paste(item, text, screen, now)
+
+    async def check_paste(self, a: AgentRun, p: Paste, now: float) -> None:
+        """Press Enter once the paste shows in the input box, or ask you to look."""
+        if not self.can_type(a, p.item):
+            return  # a turn of yours runs, or it waits for you
+        target = pane(a.name)
+        screen = await self.tmux.run(
+            "capture-pane", "-p", "-J", "-t", target, check=False
+        )
+        if paste_shown(a.tool, p.before, screen, p.text):
+            if now - p.at < 0.1:  # gemini takes an Enter so soon as a newline
+                return
             await self.tmux.run("send-keys", "-t", target, "Enter")
-            a.outbox.pop(0)
-            a.blocked_screen = ""
-            if step_id:
-                self.db.execute("UPDATE steps SET sent = 1 WHERE id = ?", (step_id,))
+            a.outbox = [o for o in a.outbox if o is not p.item]
+            self.delivered(a, p.item)
+            p.entered = now
             a.in_turn = True
             self.set_state(a, "working")
+        elif now - p.at <= PASTE_TIMEOUT:
+            return
+        elif p.looked:
+            a.pasting = None  # you were in since, and it is not in the box: again
+        elif not p.missed:
+            # A dialog took the paste (claude's ❯ marks a dialog's rows too), and would
+            # take Enter as a choice. No second paste until you have looked: one into
+            # a dialog that shows it would fill the dialog up.
+            p.missed = True
+            self.needs_you(
+                a,
+                "a dialog is open on its screen; transport to answer it",
+                typeable=True,
+            )
+
+    async def check_turn(self, a: AgentRun, p: Paste, now: float) -> None:
+        """After Enter, a turn starts (turn_started ends the wait). If none does, press
+        Enter once more while the text still shows in the input box, then ask you."""
+        if a.state != "working":  # another signal came first
+            a.pasting = None
+            return
+        if now - p.entered < SUBMIT_TIMEOUT:
+            return
+        target = pane(a.name)
+        screen = await self.tmux.run(
+            "capture-pane", "-p", "-J", "-t", target, check=False
+        )
+        if not p.again and paste_shown(a.tool, p.before, screen, p.text):
+            await self.tmux.run("send-keys", "-t", target, "Enter")
+            p.again, p.entered = True, now
+            return
+        a.pasting = None
+        self.needs_you(a, "what pantheon typed did not start a turn")
 
     async def finish(self, fin: Finish) -> None:
         self.set_session_state(fin.state)
         text = fin.note
-        if self.mode.needs_git and self.base and not self.mode.multi_agent:
+        if self.mode.needs_git and self.base and not self.mode.team:
             summary = git_summary(self.workdir, self.base)
             text += f"\n\n{summary}" if summary else ""
-        kind = "done" if fin.state == "done" else "waiting"
-        self.event(kind, text, data={"retry": fin.retry})
-        if fin.state == "done" and self.mode.stop_when_done:
+        self.event("done", text)
+        if self.mode.stop_when_done:
             await self.stop_agents()
             self.event("note", "Stopped the agents.")
 
@@ -3244,11 +4047,17 @@ class Session:
 
     def remind(self, a: AgentRun) -> None:
         step = self.open_step(a, sent_only=True)
-        if step is None or any(sid is None for _, sid in a.outbox):
+        if step is None or any(o.kind == "remind" for o in a.outbox):
             return
         a.typeable = a.typeable or a.state == "needs_you"
-        text = f"Please finish {self.brief_path(step)}: write {self.result_path(step)} and end it with the PANTHEON line."
-        a.outbox.append((text, None))
+        write = self.mode.stages[step["stage"]].write
+        result = result_lines(write, self.result_path(step), step["statuses"].split())
+        # The note's room id ends the text, so an earlier reminder ends another way.
+        note = self.event("note", f"You reminded {a.name} to finish step {step['id']}.")
+        text = PROMPTS["remind"].format(
+            step=step["id"], commands=self.commands(a), result=result, id=note
+        )
+        a.outbox.append(Outgoing(text, "remind", step["id"]))
 
     def approve(self, step_id: int) -> None:
         step = self.step(step_id)
@@ -3272,15 +4081,6 @@ class Session:
             self.set_session_state("running")
             self.refresh_session_state()
 
-    def another_round(self) -> None:
-        if self.state != "waiting":
-            return
-        self.max_rounds += 1
-        self.db.execute("UPDATE session SET max_rounds = ?", (self.max_rounds,))
-        self.set_session_state("running")
-        self.refresh_session_state()
-        self.event("note", f"One more round (up to {self.max_rounds}).")
-
     async def fit(self, only: str = "") -> None:
         cols, rows = self.term_size()
         for a in self.live_agents():
@@ -3297,6 +4097,7 @@ class Session:
                 )
 
     async def stop_agents(self) -> None:
+        self.read_posts()  # the rmtree below would lose them; they go in the room
         self.stopping = True  # the engine stands still, and exits are not news
         try:
             out = await self.tmux.run(
@@ -3322,7 +4123,8 @@ class Session:
             shutil.rmtree(
                 self.scratch, ignore_errors=True
             )  # the session file has it all
-            tmux_conf(self.slug).unlink(missing_ok=True)
+            for path in private_files(self.slug):
+                path.unlink(missing_ok=True)
         finally:
             self.stopping = False
 
@@ -3382,9 +4184,9 @@ def session_label(s: Session) -> Content:
 
 
 def tab_label(a: AgentRun) -> Content:
-    return Content.assemble(
-        (f"{AGENT_BADGES.get(a.state, '?')} {a.name}", agent_color(a))
-    )
+    # An agent that waits for an answer in the room is idle, but not done.
+    badge = "?" if a.reason == ROOM_WAIT else AGENT_BADGES.get(a.state, "?")
+    return Content.assemble((f"{badge} {a.name}", agent_color(a)))
 
 
 class Mirror(Static):
@@ -3516,6 +4318,15 @@ class Room(VerticalScroll):
         self.anchor()  # follow new entries until you scroll up
 
 
+class SayBox(Input):
+    """Where you post to the room. Escape leaves it, so [ and ] switch tabs again."""
+
+    DEFAULT_CSS = "SayBox { background: $panel; }"
+
+    def key_escape(self) -> None:
+        self.screen.set_focus(None)
+
+
 class SessionView(Vertical):
     DEFAULT_CSS = """
     SessionView { height: 1fr; }
@@ -3527,7 +4338,7 @@ class SessionView(Vertical):
         super().__init__(**kwargs)
         self.session = session
         self.last_event = 0
-        # Fits names like implement2-codex-2, so the room's columns line up.
+        # Fits names like review2-codex-2, so the room's columns line up.
         self.name_width = max(
             [12]
             + [len(f"{st}2-{k}") for st in session.mode.stages for k in session.roster]
@@ -3535,12 +4346,27 @@ class SessionView(Vertical):
         self.tabs: set[str] = set()
         self.needs: dict[str, ActionEntry] = {}  # agent -> its live "needs you" entry
         self.gates: dict[int, ActionEntry] = {}  # step id -> its live approve entry
-        self.rounds: list[ActionEntry] = []  # live "Another round" entries
 
     def compose(self) -> ComposeResult:
         with TabbedContent():
             with TabPane("Room", id="room"):
                 yield Room()
+                if not self.session.foreign:  # read-only: no pantheon here drives it
+                    yield SayBox(
+                        placeholder="Say to the room; every agent gets it (ctrl+s)",
+                        compact=True,
+                    )
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        text = event.value.strip()
+        if not text:
+            return
+        if not self.session.driving:  # its posts would reach no agent
+            self.app.notify("Another pantheon has this session now; post there.")
+            return
+        self.session.post("you", text)
+        event.input.clear()
 
     def active_agent(self) -> str | None:
         active = self.query_one(TabbedContent).active
@@ -3562,6 +4388,28 @@ class SessionView(Vertical):
                 *head, (f"{text} → {data.get('status', '')}", "bold")
             )
             return long_entry(title, step["result"] if step else "")
+        if kind == "prompt" and a is not None:  # pantheon to the agent
+            step = s.step(data.get("step", 0))
+            what = ""
+            if step is not None:
+                what = step["stage"] + (
+                    f" round {step['round']}" if step["round"] else ""
+                )
+            title = Content.assemble(
+                head[0],
+                (f"{'pantheon':<{self.name_width}} ", "bold"),
+                "→ ",
+                (a.name, style),
+                f": {what}",
+            )
+            return long_entry(title, text)
+        if kind == "say":
+            who = a.name if a else str(data.get("from") or "you")
+            first, _, rest = text.partition("\n")
+            title = Content.assemble(
+                head[0], (f"{who:<{self.name_width}} ", style), first
+            )
+            return long_entry(title, rest)
         if kind == "needs" and a is not None:
             buttons = [("Transport", lambda: self.app.transport(s, a.name))]
             if data.get("remind"):
@@ -3588,21 +4436,6 @@ class SessionView(Vertical):
             entry = ActionEntry(Content.assemble(*head, (text, "bold")), buttons, live)
             if live:
                 self.gates[step_id] = entry
-            return entry
-        if kind == "waiting":
-            for old in self.rounds:
-                old.resolve()
-            if not data.get(
-                "retry"
-            ):  # e.g. no branch picked: one more round cannot help
-                return Static(Content.assemble(*head, (text, "bold")))
-            live = s.state == "waiting" and not s.foreign
-            entry = ActionEntry(
-                Content.assemble(*head, (text, "bold")),
-                [("Another round", s.another_round)],
-                live,
-            )
-            self.rounds = [entry] if live else []
             return entry
         styles = {"error": "red", "done": "bold green"}
         first, _, rest = text.partition("\n")
@@ -3647,10 +4480,6 @@ class SessionView(Vertical):
             if step is None or step["approved"] or not going:
                 entry.resolve()
                 del self.gates[step_id]
-        if s.state != "waiting":
-            for entry in self.rounds:
-                entry.resolve()
-            self.rounds = []
         for view in self.query(AgentView):
             view.sync()
 
@@ -3831,6 +4660,7 @@ class PantheonApp(App):
         Binding("left_curly_bracket", "session(-1)", "Prev session", show=False),
         Binding("right_curly_bracket", "session(1)", "Next session", show=False),
         Binding("ctrl+t", "transport", "Transport"),
+        Binding("ctrl+s", "say", "Say"),
         Binding("ctrl+o", "sessions", "Sessions"),
         Binding("ctrl+n", "new_session", "New"),
         Binding("ctrl+e", "end_session", "End session"),
@@ -3953,7 +4783,7 @@ class PantheonApp(App):
                 label = session_label(x)
                 if tab.label_text != label.plain:
                     tab.label = label
-                needs = slug != self.current and x.state in ("needs_you", "waiting")
+                needs = slug != self.current and x.asks() > 0
                 tab.set_class(needs, "-needs")
                 if needs and not tabs.region.contains_region(tab.region):
                     hidden += 1
@@ -3976,9 +4806,7 @@ class PantheonApp(App):
         # The session in view decides: yolo is fixed when a session starts.
         self.query_one("#yolo-badge").set_class(s.yolo if s else self.yolo, "-on")
         for slug, x in self.sessions.items():
-            n = sum(1 for a in x.agents.values() if a.state == "needs_you") + (
-                x.state == "waiting"
-            )
+            n = x.asks()
             if slug != self.current and n > self.seen_needs.get(slug, 0):
                 self.notify(f"{slug} needs you", severity="warning")
             self.seen_needs[slug] = n
@@ -4048,6 +4876,17 @@ class PantheonApp(App):
             self.notify("Pick an agent tab first.")
             return
         self.transport(s, name)
+
+    def action_say(self) -> None:
+        view = self.current_view()
+        if view is None:
+            self.notify("Open a session first (ctrl+o).")
+            return
+        if view.session.foreign:
+            self.notify("This session is read-only here.")
+            return
+        view.query_one(TabbedContent).active = "room"
+        view.query_one(SayBox).focus()
 
     @work(exclusive=True, group="transport", exit_on_error=False)
     async def transport(self, s: Session, name: str) -> None:
@@ -4367,7 +5206,8 @@ def cmd_sessions(prune: int | None) -> None:
                 continue
             stop_server_sync(r["slug"])
             shutil.rmtree(scratch_dir(r["slug"]), ignore_errors=True)
-            tmux_conf(r["slug"]).unlink(missing_ok=True)
+            for path in private_files(r["slug"]):
+                path.unlink(missing_ok=True)
             for suffix in ("", "-journal", "-wal", "-shm"):
                 Path(f"{db_path(r['slug'])}{suffix}").unlink(missing_ok=True)
             print(f"deleted {r['slug']}")
@@ -4390,7 +5230,8 @@ def cmd_sessions(prune: int | None) -> None:
 
 
 def cmd_show(slug: str, name: str) -> None:
-    db = connect(db_path(slug))
+    path = db_path(slug)
+    db = connect(path)
     try:
         s = db.execute("SELECT * FROM session").fetchone()
         steps = db.execute(
@@ -4406,10 +5247,7 @@ def cmd_show(slug: str, name: str) -> None:
                 die(f"{name!r} matches {len(hits)} results; this session has: {names}")
             sys.stdout.write(hits[0]["result"].rstrip("\n") + "\n")
             return
-        events = db.execute(
-            "SELECT e.*, a.name AS agent FROM events e LEFT JOIN agents a ON a.id = e.agent_id"
-            " WHERE e.kind != 'hook' ORDER BY e.id"
-        ).fetchall()
+        room = room_entries(db, run_dir_of(path), full=True)
         try:
             roster = db.execute("SELECT * FROM roster WHERE listed = 1 ORDER BY id")
             agents = [spec_text(r["tool"], r["model"], r["effort"]) for r in roster]
@@ -4430,19 +5268,138 @@ def cmd_show(slug: str, name: str) -> None:
         for r in steps:
             print(f"  {r['name']:<28} {r['agent']:<{width}} {r['status']}")
     print("\nRoom:")
-    for e in events:
-        lines = e["text"].splitlines() or [""]
-        print(f"  {stamp(e['at'])} {e['agent'] or 'pantheon':<{width}} {lines[0]}")
-        for line in lines[1:]:
-            print(f"  {'':<{width + 6}} {line}")
+    for entry in room:
+        print(textwrap.indent(entry, "  "))
+
+
+# Under claude's 30,000: past that, claude shows the agent only the output's start.
+ROOM_CHARS = 20_000
+
+
+def session_file(target: str) -> Path:
+    """A session file from its path, which agents give (codex may drop PANTHEON_HOME
+    from their environment), or from its slug, which people give."""
+    if os.sep not in target:
+        return db_path(resolve_slug(target))
+    path = Path(target)
+    # say writes beside it, in ../../run/<slug>/posts, so it must be a session file.
+    named = path.suffix == ".sqlite3" and path.parent.name == "sessions"
+    if not named or not path.is_file():
+        die(f"no session file at {target}")
+    return path
+
+
+def run_dir_of(path: Path) -> Path:
+    """A session file's run dir: HOME/sessions/<slug>.sqlite3 -> HOME/run/<slug>."""
+    return path.parent.parent / "run" / path.stem
+
+
+def room_entries(
+    db: sqlite3.Connection, run_dir: Path, last: int = 0, full: bool = False
+) -> list[str]:
+    """The room as text, oldest first: an entry for each event but hooks, with a
+    result by its file, and a prompt by its step, or with full, in full. last: only
+    the last N entries."""
+    events = db.execute(
+        "SELECT e.*, a.name AS agent FROM events e LEFT JOIN agents a ON a.id = e.agent_id"
+        " WHERE e.kind != 'hook' ORDER BY e.id DESC LIMIT ?",
+        (last if last > 0 else -1,),
+    ).fetchall()
+    steps = {r["id"]: r for r in db.execute("SELECT id, name, stage, round FROM steps")}
+    out = []
+    for e in reversed(events):
+        data = json.loads(e["data"] or "{}")
+        who, kind = e["agent"] or "pantheon", e["kind"]
+        first, _, rest = e["text"].partition("\n")
+        head = f"{who}: {first}"
+        step = steps.get(data.get("step"))
+        if kind == "result":
+            head = f"{who}: {e['text']} → {data.get('status', '')}"
+            rest = str(run_dir / step["name"]) if step is not None else ""
+        elif kind == "prompt":  # each first prompt holds the task: too long for agents
+            what = f"step {data.get('step')}"
+            if step is not None:
+                rnd = f" round {step['round']}" if step["round"] else ""
+                what = f"{step['stage']}{rnd} ({what})"
+            head, rest = f"pantheon → {who}: {what}", e["text"] if full else ""
+        elif kind == "say":  # agents read this too, so you are the user
+            author = e["agent"] or data.get("from", "you")
+            head = f"{PROMPTS['user'] if author == 'you' else author} says: {first}"
+        elif kind == "needs":
+            head = f"{who}: needs you: {first}"
+        body = [f"    {x}" if x.strip() else "" for x in rest.strip("\n").splitlines()]
+        out.append("\n".join([f"#{e['id']} {stamp(e['at'])} {head}", *body]))
+    return out
+
+
+def cmd_room(target: str, last: int) -> int:
+    """Print the room's last entries, for an agent. It opens the session file
+    read-only and takes no lock, so it runs beside the pantheon that has the session
+    open, and in a sandbox that cannot write the file."""
+    path = session_file(target)
+    try:
+        db = connect(path, "ro")
+        try:
+            entries = room_entries(db, run_dir_of(path), last)
+        finally:
+            db.close()  # before printing: an open read would hold up pantheon's writes
+    except sqlite3.Error as e:
+        if getattr(e, "sqlite_errorname", "") == "SQLITE_READONLY_ROLLBACK":
+            die(
+                "the session file needs repair after a crash; reopening the session in "
+                "pantheon repairs it"
+            )
+        if "no such table" in str(e):  # an empty file: trying again does not help
+            die(f"{path} is not a session file")
+        die(f"cannot read the room ({e}); try again in a moment")
+    kept, size = [], 0  # the newest entries that fit
+    for entry in reversed(entries):
+        if size + len(entry) + 1 > ROOM_CHARS:
+            if not kept:  # one entry is too long on its own
+                kept.append(entry[: ROOM_CHARS - 2] + " …")
+            break
+        kept.append(entry)
+        size += len(entry) + 1
+    left = len(entries) - len(kept)
+    lines = ([PROMPTS["room_cut"].format(n=left)] if left else []) + kept[::-1]
+    try:
+        sys.stdout.write("".join(line + "\n" for line in lines))  # in one write
+        sys.stdout.flush()
+    except BrokenPipeError:  # the reader stopped early
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    return 0
+
+
+def cmd_say(target: str, sender: str, words: list[str]) -> int:
+    """Post to the room. The post goes in a file for the pantheon that has the session
+    open, since codex's sandbox cannot write the session file."""
+    path = session_file(target)
+    text = (sys.stdin.read() if words == ["-"] else " ".join(words)).strip()
+    if not text:
+        die("say needs a message")
+    sender = sender or os.environ.get("PANTHEON_AGENT") or "you"
+    post = {"from": sender, "text": text, "at": now_iso()}
+    folder = run_dir_of(path) / "posts"
+    try:
+        private_dir(folder)
+        # Named by time, so posts go out in order. write_private renames the file into
+        # place, so pantheon never reads half a post.
+        write_private(folder / f"{time.time_ns()}-{os.getpid()}.json", json.dumps(post))
+    except (OSError, ValueError) as e:
+        die(f"cannot post to {path.stem}: {e}")
+    if session_holder(path):
+        print("pantheon: posted to the room")
+    else:
+        print(f"pantheon: posted; it waits until a pantheon opens {path.stem}")
+    return 0
 
 
 def mode_description(mode: Mode) -> str:
     width = max(map(len, mode.stages))
     lines = [mode.help, "", "stages:"]
     for name, st in mode.stages.items():
-        how = "every agent at once" if st.multi_agent else "one agent"
-        how += ", reused in later rounds" if st.reuse else ""
+        how = "every agent, one on each track" if st.team else "one agent"
+        how += "; the same instance in later rounds" if st.reuse else ""
         lines.append(f"  {name:<{width}}  {st.role} ({how})")
     level = (
         f"Effort level: {mode.effort}."
@@ -4451,9 +5408,10 @@ def mode_description(mode: Mode) -> str:
     )
     about = (
         f"{level} -a N takes the first N tools in the agents setting that can run here "
-        f"(default: {default_count(mode)}), and the first agent plays each one-agent "
-        "stage. SPEC is TOOL[:MODEL][@EFFORT], where TOOL is claude, codex, gemini, or "
-        "ollama. pantheon agents MODE shows what it would pick here."
+        f"(default: {count_help(mode)}). They take the tracks in that order, and the "
+        "first plays each one-agent stage, unless the scramble setting gives each stage "
+        "a random order. SPEC is TOOL[:MODEL][@EFFORT], where TOOL is claude, codex, "
+        "gemini, or ollama. pantheon agents MODE shows what it would pick here."
     )
     return "\n".join(lines) + "\n\n" + textwrap.fill(about, 80)
 
@@ -4476,6 +5434,11 @@ def mode_problems() -> list[str]:
         ]
         if mode.effort and mode.effort not in EFFORTS:
             out.append(f"{name}: no effort level {mode.effort!r}")
+        if mode.count < mode.least:
+            out.append(
+                f"{name}: count {mode.count} is below {mode.least}, the fewest agents "
+                "it runs with"
+            )
     for level, cells in EFFORTS.items():
         for tool, (_, effort) in cells.items():
             if tool not in TOOLS:
@@ -4530,9 +5493,9 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict]:
             default="",
             metavar="N|SPEC,...",
             help="how many agents, or which ones in order "
-            f"(default: {default_count(mode)})",
+            f"(default: {count_help(mode)})",
         )
-        singles = [s for s, st in mode.stages.items() if not st.multi_agent]
+        singles = [s for s, st in mode.stages.items() if not st.team]
         p.add_argument(
             "--agent",
             action="append",
@@ -4578,6 +5541,45 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict]:
     subs["show"].add_argument(
         "name", nargs="?", default="", metavar="NAME", help="a result, e.g. design"
     )
+    subs["room"] = sub.add_parser(
+        "room",
+        help="print a session's room",
+        description="Print a session's room, oldest first: its last entries, with a "
+        "prompt by its step and a result by its file. It takes no lock, so it works "
+        "while pantheon has the session open.",
+    )
+    subs["room"].add_argument(
+        "session",
+        metavar="SESSION",
+        help="the session file, or its slug (a unique part is enough)",
+    )
+    subs["room"].add_argument(
+        "--last", type=int, default=50, metavar="N", help="how many (default: 50)"
+    )
+    subs["say"] = sub.add_parser(
+        "say",
+        help="post to a session's room; agents use it",
+        description="Post to a session's room. Pantheon gives the post to every agent "
+        "but its author, and each decides whether it needs to act.",
+    )
+    subs["say"].add_argument(
+        "session",
+        metavar="SESSION",
+        help="the session file, or its slug (a unique part is enough)",
+    )
+    subs["say"].add_argument(
+        "--from",
+        dest="sender",
+        default="",
+        metavar="NAME",
+        help="who posts (default: $PANTHEON_AGENT, else you)",
+    )
+    subs["say"].add_argument(
+        "message",
+        nargs="+",
+        metavar="MESSAGE",
+        help="the post, or - to read it from stdin",
+    )
     subs["config"] = sub.add_parser(
         "config",
         help="show or change the settings in config.toml",
@@ -4603,8 +5605,9 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict]:
         "agents",
         help="show the agents and models a mode would get here",
         description="Show what pantheon start MODE would pick here, with no session: "
-        "the agents, the stages each plays, the flags each gets, and what each tool's "
-        "own config says about the rest. With no MODE: the tools, and the effort levels.",
+        "each stage's agents, track by track, the flags each agent gets, and what each "
+        "tool's own config says about the rest. With no MODE: the tools, and the effort "
+        "levels.",
     )
     p = subs["agents"]
     p.add_argument("mode", nargs="?", choices=list(MODES), metavar="MODE")
@@ -4648,6 +5651,12 @@ def main(argv: list[str] | None = None) -> int:
     if command == "start" and args.mode == "help":
         subs[args.topic or "start"].print_help()
         return 0
+    # Agents run these in their tools' sandboxes: no dirs to make, no lock, and no
+    # update prompt (codex runs commands on a terminal, where the prompt would wait).
+    if command == "room":
+        return cmd_room(args.session, args.last)
+    if command == "say":
+        return cmd_say(args.session, args.sender, args.message)
     problems = mode_problems()
     if problems:
         die("MODES has mistakes: " + "; ".join(problems))
@@ -4684,7 +5693,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if command == "session":
         slug = resolve_slug(args.slug)
-        holder = session_holder(slug)
+        holder = session_holder(db_path(slug))
         if holder:
             die(f"{slug} is open in another pantheon (pid {holder})")
         return run_ui(cfg, slug, yolo_flag)
