@@ -1,0 +1,226 @@
+#!/usr/bin/env -S uv run --script # python
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "textual>=8.2,<9",
+# ]
+#
+# [tool.uv]
+# exclude-newer = "2026-10-15T00:00:00Z"
+# ///
+
+# Formatted with ruff's default settings: uvx ruff format <this file>
+# The shebang's "# python" is a comment env -S drops; editors read it to pick Python.
+
+"""Tests for pantheon, the program next to this file. They start no agents and no tmux,
+and they keep their files in a scratch PANTHEON_HOME. Run: pantheon_tests [-v]"""
+
+import asyncio
+import dataclasses
+import importlib.machinery
+import importlib.util
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+# Before pantheon loads, since it reads PANTHEON_HOME once.
+SCRATCH = tempfile.TemporaryDirectory(prefix="pantheon-tests-")
+os.environ["PANTHEON_HOME"] = SCRATCH.name
+
+PROGRAM = Path(__file__).resolve().with_name("pantheon")
+loader = importlib.machinery.SourceFileLoader("pantheon", str(PROGRAM))
+P = importlib.util.module_from_spec(importlib.util.spec_from_loader("pantheon", loader))
+sys.modules["pantheon"] = P  # dataclasses look their module up here
+loader.exec_module(P)
+for folder in (P.HOME, P.SESSIONS, P.RUN):  # as main makes them
+    P.private_dir(folder)
+
+IMPLEMENT = P.MODES["implement"]
+
+# A mode for the session tests. Its agents get turns and prompts, but none starts.
+FAKE = P.Mode(
+    help="a test mode",
+    agents={"checker": P.Agent("You check."), "builder": P.Agent("You build.", True)},
+    stages={
+        "check": P.Stage("The checker checks.", {"checker": "your check"}, go_if="ok"),
+        "build": P.Stage("Each builder builds.", {"builder": "your build"}),
+    },
+    needs_task=False,
+    needs_git=False,
+)
+
+
+class PlanTest(unittest.TestCase):
+    def test_modes_have_no_problems(self):
+        self.assertEqual(P.mode_problems(), [])
+
+    def test_a_loop_with_go_if_is_a_problem(self):
+        build = dataclasses.replace(IMPLEMENT.stages["build"], go_if="ok")
+        stages = {**IMPLEMENT.stages, "build": build}
+        P.MODES["bad"] = dataclasses.replace(IMPLEMENT, stages=stages)
+        try:
+            self.assertEqual(
+                P.mode_problems(), ["bad.build: a stage with a loop can't have go_if"]
+            )
+        finally:
+            del P.MODES["bad"]
+
+    def test_statuses(self):
+        st = IMPLEMENT.stages
+        self.assertEqual(P.statuses_of(st["check"]), ("go", "stop"))
+        self.assertEqual(P.statuses_of(st["design"]), ("done",))
+        self.assertEqual(P.statuses_of(st["build"]), ("continue", "halt"))
+
+    def test_implement_checks_first(self):
+        self.assertEqual(
+            P.plan_turns(IMPLEMENT, 3, []), [("check", 0, 0, "project-manager")]
+        )
+        self.assertEqual(P.plan_turns(IMPLEMENT, 3, [("check", 0, "open")]), [])
+
+    def test_go_starts_the_design(self):
+        self.assertEqual(
+            P.plan_turns(IMPLEMENT, 3, [("check", 0, "go")]),
+            [("design", t, 0, "architect") for t in (1, 2, 3)],
+        )
+
+    def test_stop_ends_the_plan(self):
+        self.assertIsNone(P.plan_turns(IMPLEMENT, 3, [("check", 0, "stop")]))
+
+    def test_implement_runs_to_the_end(self):
+        steps = [("check", 0, "go"), ("design", 1, "done"), ("design", 2, "done")]
+        # Track 1 halts in round 2; track 2 runs out of its 5 rounds.
+        steps += [("build", 1, s) for s in ("continue",) * 3 + ("halt",)]
+        steps += [("build", 2, "continue")] * 9
+        self.assertEqual(
+            P.plan_turns(IMPLEMENT, 2, steps), [("build", 2, 5, "engineer-reviewer")]
+        )
+        steps.append(("build", 2, "continue"))
+        compare = [("compare", 0, 0, "project-manager")]
+        self.assertEqual(P.plan_turns(IMPLEMENT, 2, steps), compare)
+        self.assertIsNone(P.plan_turns(IMPLEMENT, 2, steps + [("compare", 0, "done")]))
+
+    def test_a_stop_waits_for_every_track(self):
+        mode = dataclasses.replace(
+            FAKE,
+            stages={
+                "check": P.Stage("g", {"builder": "x"}, go_if="ok"),
+                "next": P.Stage("g", {"checker": "y"}),
+            },
+        )
+        self.assertEqual(
+            P.plan_turns(mode, 2, [("check", 1, "stop")]), [("check", 2, 0, "builder")]
+        )
+        self.assertEqual(
+            P.plan_turns(mode, 2, [("check", 1, "stop"), ("check", 2, "open")]), []
+        )
+        self.assertIsNone(
+            P.plan_turns(mode, 2, [("check", 1, "stop"), ("check", 2, "go")])
+        )
+        self.assertEqual(
+            P.plan_turns(mode, 2, [("check", 1, "go"), ("check", 2, "go")]),
+            [("next", 0, 0, "checker")],
+        )
+
+    def test_hello(self):
+        hello = P.MODES["hello"]
+        self.assertEqual(
+            P.plan_turns(hello, 2, [("hello", 1, "done")]), [("hello", 2, 0, "greeter")]
+        )
+        steps = [("hello", 1, "done"), ("hello", 2, "done")]
+        self.assertEqual(
+            P.plan_turns(hello, 2, steps), [("reply", t, 0, "greeter") for t in (1, 2)]
+        )
+
+    def test_plan_text(self):
+        text = P.plan_text(IMPLEMENT)
+        self.assertTrue(text.startswith("The plan: check the task, design"))
+        self.assertIn("1. check: project-manager. The project manager checks", text)
+        go = P.PROMPTS["plan_go"].format(go_if=IMPLEMENT.stages["check"].go_if)
+        self.assertEqual(text.count(go), 1)
+        self.assertNotIn("The plan goes on only if", P.plan_text(P.MODES["hello"]))
+
+    def test_turn_label(self):
+        self.assertEqual(P.turn_label("build", 2, 1), "build round 2, track 1")
+        self.assertEqual(P.turn_label("check", 0, 0), "check")
+
+
+class StatusTest(unittest.TestCase):
+    def parse(self, text):
+        return P.parse_status(text, "01-x.md", ["go", "stop"])
+
+    def test_good(self):
+        self.assertEqual(self.parse("Fine.\n\nPANTHEON: go\n"), ("go", ""))
+        self.assertEqual(self.parse("No.\npantheon: Stop\n\n"), ("stop", ""))
+
+    def test_problems(self):
+        self.assertEqual(self.parse(None)[1], "ended its turn without writing 01-x.md")
+        self.assertEqual(
+            self.parse("PANTHEON: done")[1],
+            "01-x.md ends with PANTHEON: done, not go or stop",
+        )
+        late = "PANTHEON: go\na\nb\nc\n"  # only the last three lines count
+        self.assertEqual(self.parse(late)[1], "01-x.md has no PANTHEON line at the end")
+
+    def test_result_lines(self):
+        text = P.result_lines("your check", "/x/01.md", ("go", "stop"))
+        self.assertIn("\n\n    /x/01.md\n\n", text)
+        self.assertTrue(text.endswith("PANTHEON: go\nPANTHEON: stop"))
+
+
+class SessionTest(unittest.TestCase):
+    """A session of the fake mode, which pantheon opens as it would any session."""
+
+    def setUp(self):
+        P.MODES["fake"] = FAKE
+        self.tool_problems = P.tool_problems
+        P.tool_problems = lambda cfg: dict.fromkeys(P.TOOLS, "")  # no PATH lookups
+        self.dir = tempfile.mkdtemp(dir=SCRATCH.name)
+        req = P.NewSession("fake", "", self.dir, False, agents="claude,codex")
+        slug, _ = P.prepare({}, req, lambda files, note: True)
+        self.s = P.Session(slug, {}, lambda: (80, 24))
+
+    def tearDown(self):
+        self.s.close()
+        P.tool_problems = self.tool_problems
+        del P.MODES["fake"]
+
+    def check_step(self):
+        return self.s.create_step("check", 0, 0, self.s.agent_for("checker", 0))
+
+    def room(self, kind):
+        rows = self.s.db.execute("SELECT text FROM events WHERE kind = ?", (kind,))
+        return [r["text"] for r in rows]
+
+    def test_the_check_prompt(self):
+        prompt = self.check_step()["prompt"]
+        self.assertIn(
+            "The plan goes on only if this is true: ok; else it ends here.", prompt
+        )
+        self.assertIn("PANTHEON: go\nPANTHEON: stop", prompt)
+        self.assertIn(P.PROMPTS["go"].format(go_if="ok"), prompt)
+        self.assertEqual(self.room("prompt"), [prompt])
+
+    def test_a_stop_ends_the_session(self):
+        step = self.check_step()
+        # The record of a turn that ended with a stop.
+        self.s.db.execute(
+            "UPDATE steps SET status = 'stop' WHERE id = ?", (step["id"],)
+        )
+        self.s.save_agent(self.s.agents["checker-claude"], state="idle")
+        asyncio.run(self.s.advance())
+        self.assertEqual(self.s.state, "done")
+        done = (
+            "The plan stopped after check. Read why in 01-checker-claude.md, by "
+            "checker-claude. The agents still run: post in the room (ctrl+s) to "
+            "give them more work. No turn came for builder-claude, builder-codex, "
+            "so they never started."
+        )
+        self.assertEqual(self.room("done"), [done])
+        count = self.s.db.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+        self.assertEqual(count, 1)  # the builders never got a row
+
+
+if __name__ == "__main__":
+    unittest.main()

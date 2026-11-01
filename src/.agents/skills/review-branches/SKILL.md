@@ -16,10 +16,10 @@ Each mode has a keyword. The user may name the keyword or just describe what the
 - **`prs`** — an explicit list of PR numbers.
 - **`mrs`** — an explicit list of MR numbers. Same path as `prs`; forge detection picks the CLI, so either keyword works either place.
 - **`pipeline-complete`** — every open MR/PR labeled `llm::pipeline-complete`, the "the LLM pipeline finished, now review its work" batch. `glab mr list --label 'llm::pipeline-complete' --repo …`, or `gh pr list --label 'llm::pipeline-complete' --json number,title,author,isDraft,headRefName`. Quote the label — the `::` is a GitLab scoped-label separator, not shell-safe on its own.
-- **`mine`** (the default) — open PRs/MRs where the user is the assignee or the requested reviewer, not everything the repo has open.
-  - Assignee OR reviewer, never both at once — one filter per call, then union the results on number. Both forges AND their filters within a single call, so `--assignee=@me --reviewer=@me` returns only the ones where you are both, which is not what we want.
-  - **gh** — `gh pr list --assignee @me --json number,title,author,isDraft,headRefName`, then `gh pr list --search "review-requested:@me" --json ...`.
-  - **glab** — `glab mr list --assignee=@me --repo …`, then `glab mr list --reviewer=@me --repo …`. If the installed glab lacks a flag, run the same two passes through `glab api` on `assignee_username` / `reviewer_username`.
+- **`mine`** (the default) — open PRs/MRs where the user is the author, the assignee, or the requested reviewer, not everything the repo has open.
+  - Author OR assignee OR reviewer — one filter per call, then union the results on number. Both forges AND their filters within a single call, so `--author=@me --assignee=@me` returns only the ones where you are both, which is not what we want.
+  - **gh** — `gh pr list --author @me --json number,title,author,isDraft,headRefName`, then `gh pr list --assignee @me --json ...`, then `gh pr list --search "review-requested:@me" --json ...`.
+  - **glab** — `glab mr list --author=@me --repo …`, then `glab mr list --assignee=@me --repo …`, then `glab mr list --reviewer=@me --repo …`. If the installed glab lacks a flag or rejects `@me`, run the same three passes through `glab api` on `author_username` / `assignee_username` / `reviewer_username`.
 
 Print the resolved batch before going further: number (if any), title, author, draft flag, branch, and why it's in the batch. If the batch is empty, say so and stop.
 
