@@ -1,0 +1,28 @@
+{
+  "security": {
+    "auth": {
+      "selectedType": "oauth-personal"
+    }
+  },
+  "ui": {
+    "showModelInfoInChat": true
+  },
+  "mcpServers": {
+    "rgnets-infrastructure": {
+      "url": "https://mcp.rgnets.com/messages",
+      "type": "http"
+    }
+  },
+  "general": {
+    "enableAutoUpdate": false,
+    "sessionRetention": {
+      "warningAcknowledged": true,
+      "enabled": true,
+      "maxAge": "30d"
+    }
+  },
+  "ide": {
+    "hasSeenNudge": true,
+    "enabled": true
+  }
+}
