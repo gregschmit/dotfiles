@@ -24,6 +24,8 @@ alias snap-store-fix="LIBGL_ALWAYS_SOFTWARE=1 snap-store"
 
 alias claude_yolo="claude --dangerously-skip-permissions"
 alias fixdns="sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder"
+alias disable_sleep="sudo pmset -a disablesleep 1"
+alias enable_sleep="sudo pmset -a disablesleep 0"
 
 #########################
 # Interactive Tool Init #
