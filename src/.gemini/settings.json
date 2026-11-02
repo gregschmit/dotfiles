@@ -7,12 +7,6 @@
   "ui": {
     "showModelInfoInChat": true
   },
-  "mcpServers": {
-    "rgnets-infrastructure": {
-      "url": "https://mcp.rgnets.com/messages",
-      "type": "http"
-    }
-  },
   "general": {
     "enableAutoUpdate": false,
     "sessionRetention": {
