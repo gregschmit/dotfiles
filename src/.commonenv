@@ -61,6 +61,9 @@ eval_if_exists() {
 # XDG
 path_prepend "$HOME/.local/bin"
 
+# opencode
+path_prepend "$HOME/.opencode/bin"
+
 # Google Cloud SDK (path only; completion lives in `.commonrc`)
 if [ -n "$ZSH_VERSION" ]; then
   source_if_exists "$HOME/google-cloud-sdk/path.zsh.inc"

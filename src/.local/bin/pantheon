@@ -18,9 +18,15 @@
 Each agent is a real CLI (claude, codex, or gemini). A mode names its agents, and a plan: stages in
 which the agents take turns, and in a loop, take them again until one of them finds the stage's
 halting prompt true. A stage can also let its agents stop the plan, when they find it should not go
-on. A multi agent has an instance on each track, one for each tool; pantheon start help MODE shows a
-mode's agents and plan. Every agent knows the team, the plan, and the room, and acts when it sees a
-reason; once the plan is done, the agents keep running, and you give them more work in the room.
+on, or let one agent pick the track the plan goes on with. A multi agent has an instance for each
+tool: each on a track of its own, or in a stage where they work together, all taking each turn at
+once (which then halts a loop only if all of them halt it); pantheon start help MODE shows a mode's
+agents and plan. A mode can also start an agent again, fresh, for each of its turns, as bakeoff and
+develop do their reviewers, so no review leans on the last one: each start is a new generation of
+that agent, which its tab shows, as in "reviewer-codex (2)", and the room notes. An agent that
+exits starts again the same way at its next turn. Every agent knows the team, the plan, and the
+room, and acts when it sees a reason; once the plan is done, the agents keep running, and you give
+them more work in the room.
 Pantheon shows the team in a chat-room feed (the room), gives each agent a tab with a live copy of
 its screen, and lets you "transport" into an agent's own terminal when it needs you. Ctrl-] or the
 button on tmux's status line brings you back. The top row has a tab for each session you have open
@@ -29,17 +35,18 @@ button on tmux's status line brings you back. The top row has a tab for each ses
 Agents keep your own setup: agent files, skills, MCP servers, and permission rules. Pantheon adds
 only rules that let them run the room's two commands without asking you. An ollama agent is claude
 with the ollama server as its API; if claude keeps an API key from a Console login, it sends that
-key to the server too. Pantheon types each turn's instructions straight into its agent, and the
-agent writes its result to a file that ends with a "PANTHEON: <status>" line. The room is the team's
-channel: each agent learns how to read it (pantheon room) and post to it (pantheon say), and
-pantheon gives each post to every other agent, which decides whether it needs to act. So an agent
-can ask the team a question, or wake another agent. You can post too (ctrl+s): to answer, or to give
-a team that is done more work. Pantheon's own lines in the room go to no agent. Each session has a
-private tmux server, so agents keep running when pantheon exits. Claude and codex report through
-hooks; gemini reports through its window title. The room names the model each agent really runs, and
-claude's effort, where they differ from what pantheon asked for (gemini's model comes from its chat
-file). Unless it runs from a clone of gregschmit/dotfiles (git updates that), pantheon looks on
-GitHub for a newer version at most every 12 hours.
+key to the server too, so a server on another machine needs the ollama_remote setting. Pantheon
+types each turn's instructions straight into its agent, and the agent writes its result to a file
+that ends with a "PANTHEON: <status>" line. The room is the team's channel: each agent learns how
+to read it (pantheon room) and post to it (pantheon say), and pantheon gives each post to every
+other agent, which decides whether it needs to act. So an agent can ask the team a question, or wake
+another agent. You can post too (ctrl+s): to answer, or to give a team that is done more work. Only
+those posts reach the agents as the user's. Pantheon's own lines in the room go to no agent. Each
+session has a private tmux server, so agents keep running when pantheon exits. Claude and codex
+report through hooks; gemini reports through its window title. The room names the model each agent
+really runs, and claude's effort, where they differ from what pantheon asked for (gemini's model
+comes from its chat file). Unless it runs from a clone of gregschmit/dotfiles (git updates that),
+pantheon looks on GitHub for a newer version at most every 12 hours.
 
 Files: ~/.local/state/pantheon (or $PANTHEON_HOME) holds config.toml and one sqlite file per
 session, sessions/<slug>.sqlite3. That file is the whole session: its record, its lock, the prompts,
@@ -58,6 +65,7 @@ import glob
 import hashlib
 import hmac
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -83,7 +91,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NoReturn
 
 from rich.text import Text
 from textual import work
@@ -147,9 +155,15 @@ class Agent:
     """One of a mode's agents."""
 
     role: str  # its job, which comes first in its first prompt
-    # One instance for each tool from -a, each on a track of its own; else one instance,
-    # which works on every track.
+    # One instance for each tool from -a, each on a track of its own (or, in a stage
+    # whose agents work together, all at once); else one instance, which works on
+    # every track.
     multi: bool = False
+    # Start it again, fresh, for each of its turns after the first, so no turn leans
+    # on what it thought in the last one (a reviewer's own review, say). Each start
+    # is a new generation, which its tab shows; it can still answer the room between
+    # its turns.
+    fresh: bool = False
 
 
 @dataclass(frozen=True)
@@ -163,8 +177,9 @@ class Loop:
 
 @dataclass(frozen=True)
 class Stage:
-    """A part of the plan. Its agents take turns in order, on each track when one of
-    them is multi, and the next stage starts once this one is done on every track."""
+    """A part of the plan. Its agents take turns in order: on each track when one of
+    them is multi (unless together), and the next stage starts once this one is done
+    on each track it runs on."""
 
     goal: str  # what the stage is for: its line in the plan that every agent reads
     agents: dict[str, str]  # the agents that take turns, in order: what each writes
@@ -172,6 +187,13 @@ class Stage:
     # For a stage with no loop: the plan goes on past it only if its agents find this
     # true. Each result then ends with go or stop, and one stop ends the plan.
     go_if: str = ""
+    # For a stage with one single agent and no loop: the track it picks, as this says.
+    # Its result then ends with track-N, and the later stages run on track N alone; or
+    # with stop, which ends the plan.
+    pick: str = ""
+    # No tracks: the stage runs once, and a multi agent's instances take each of its
+    # turns at once. Such a turn halts a loop only if all of them halt it.
+    together: bool = False
 
 
 @dataclass(frozen=True)
@@ -187,55 +209,60 @@ class Mode:
 
 
 MODES: dict[str, Mode] = {
-    "implement": Mode(
+    "bakeoff": Mode(
         help=(
             "check the task, design the change several ways, build and review each, "
-            "keep the best"
+            "pick the best, and finish it with the best of the rest"
         ),
         agents={
             "architect": Agent(
-                "You are an architect. Study the task and the code, then design the "
-                "change: what to change, where, why, and how to check it. Write it so "
-                "an engineer can build it without you. Do not change the code. You "
-                "own your design: answer questions about it, and fix it when someone "
-                "finds a problem.",
+                "You are a software architect: an engineer who designs changes to "
+                "code. Study the task and the code, then design the change: what to "
+                "change, where, why, and how to test it. Write it so a developer can "
+                "build it without you. Do not change the code. You own your design: "
+                "answer questions about it, and fix it when someone finds a problem.",
                 multi=True,
             ),
-            "engineer-implementor": Agent(
-                "You are an implementing engineer. Build your track's design in a git "
-                "worktree of your own, on a new branch from the session's start "
-                "commit, and commit your work. If the design has a gap or a mistake, "
-                "ask its architect in the room. When your reviewer asks for changes, "
-                "make them, or refuse the ones you think are wrong, and say why.",
+            "developer": Agent(
+                "You are a software developer: an engineer who writes and tests code. "
+                "Build your track's design in a git worktree of your own, on a new "
+                "branch from the session's start commit, and commit your work. If the "
+                "design has a gap or a mistake, ask its architect in the room. When "
+                "your reviewer asks for changes, make them, or refuse the ones you "
+                "think are wrong, and say why.",
                 multi=True,
             ),
-            "engineer-reviewer": Agent(
-                "You are a reviewing engineer. Review your track's build against the "
-                "task and the design: every change on its branch, uncommitted files "
-                "too, and run the checks you can. Approve it if it is good to keep; "
-                "else ask for changes, and say exactly what and why. Do not change "
-                "the code.",
+            "reviewer": Agent(
+                "You are a code reviewer: an engineer who checks code for bugs, gaps, "
+                "and risks. Review your track's build against the task and the "
+                "design: every change on its branch, uncommitted files too, and run "
+                "the tests and checks you can. Approve it if it is good to keep; else "
+                "ask for changes, and say exactly what and why. Do not change the "
+                "code.",
                 multi=True,
+                fresh=True,
             ),
-            "project-manager": Agent(
-                "You are the project manager. You own the outcome, not the code. "
-                "First, check the task before the team starts on it: is it clear "
-                "enough to design, and safe and sensible to do? Look for a task that "
-                "is vague, contradicts itself or the code, could destroy data or "
-                "work, is dangerous, or seems unwise. Ask the user in the room about "
-                "each problem, and wait for the answers; stop the plan only if the "
-                "problem stays. At the end, judge the team's work against the task, "
-                "decide what to keep, and report to the user. Do not change the code; "
-                "ask the engineers in the room.",
+            "chief-architect": Agent(
+                "You are the chief architect: the team's lead engineer, who owns the "
+                "technical outcome. Judge the work by its code and its tests, not by "
+                "its reports alone. First, check the task before the team starts on "
+                "it: is it clear enough to design, and safe and sensible to do? Look "
+                "for a task that is vague, contradicts itself or the code, could "
+                "destroy data or work, is dangerous, or seems unwise. Ask the user in "
+                "the room about each problem, and wait for the answers; stop the plan "
+                "only if the problem stays. Once the builds are done, compare them, "
+                "pick the one to keep, and decide what it should take from the other "
+                "designs and builds. Do not change the code; ask the developers in the "
+                "room.",
             ),
         },
         stages={
             "check": Stage(
-                "The project manager checks that the task is clear, safe, and sensible "
+                "The chief architect checks that the task is clear, safe, and sensible "
                 "to do, and asks the user about anything that is not, before the team "
                 "starts.",
                 {
-                    "project-manager": (
+                    "chief-architect": (
                         "your check: the task as you understand it, the user's "
                         "answers to your questions, and any limits the team must "
                         "keep to; or, if you stop the plan, why"
@@ -251,30 +278,105 @@ MODES: dict[str, Mode] = {
                 {"architect": "your design"},
             ),
             "build": Stage(
-                "The engineer builds the track's design, and the reviewer reviews the "
+                "The developer builds the track's design, and the reviewer reviews the "
                 "build.",
                 {
-                    "engineer-implementor": (
+                    "developer": (
                         "a summary of your work: its branch, its worktree, and what changed"
                     ),
-                    "engineer-reviewer": "your review",
+                    "reviewer": "your review",
                 },
                 Loop(
-                    "the reviewer approves the build, or the engineer refuses the changes the "
-                    "reviewer asks for",
+                    "the reviewer approves the build, or the developer refuses the "
+                    "changes the reviewer asks for",
                     max_rounds=5,
                 ),
             ),
             "compare": Stage(
-                "The project manager compares the builds, picks the one to keep, and "
-                "writes the report for the user.",
+                "The chief architect compares the builds: their code, their tests, and "
+                "how well each does the task.",
                 {
-                    "project-manager": (
-                        "your report for the user: the build you pick (or none), what it should "
-                        "take from the others, how to check it, and which branches and "
-                        "worktrees can go"
+                    "chief-architect": (
+                        "your comparison for the user: how each build does, and the "
+                        "one you pick and why (or why none)"
                     ),
                 },
+                pick="the track with the build to keep",
+            ),
+            "refine": Stage(
+                "The chief architect decides what the picked build should take from "
+                "the other designs and builds, and writes it up for its developer.",
+                {
+                    # The other tracks' work is still in use here, so the cleanup
+                    # waits for the finish.
+                    "chief-architect": (
+                        "what the picked build should take from the others: what, "
+                        "from which track, and why, so that its developer can build "
+                        "it without you (or, if nothing, why); and which branches and "
+                        "worktrees can go once it is finished"
+                    ),
+                },
+            ),
+            "finish": Stage(
+                "The picked track's developer builds the chief architect's changes, "
+                "and its reviewer reviews the build again.",
+                {
+                    "developer": (
+                        "a summary of your work: its branch, its worktree, what you "
+                        "took from the other tracks, what changed, how to check it, "
+                        "and which branches and worktrees can go now"
+                    ),
+                    "reviewer": "your review",
+                },
+                # Not build's words: its reviewer approved the build there already.
+                Loop(
+                    "the reviewer approves the build with the chief architect's "
+                    "changes, or the developer refuses the changes the reviewer asks "
+                    "for",
+                    max_rounds=5,
+                ),
+            ),
+        },
+        count=3,
+    ),
+    "develop": Mode(
+        help=(
+            "build the change, then review it with a reviewer for each tool, round "
+            "after round, until they approve it"
+        ),
+        agents={
+            "developer": Agent(
+                "You are a software developer: an engineer who writes and tests code. "
+                "Build the change in a git worktree of your own, on a new branch from "
+                "the session's start commit, and commit your work. When the reviewers "
+                "ask for changes, make them, or refuse the ones you think are wrong, "
+                "and say why.",
+            ),
+            "reviewer": Agent(
+                "You are a code reviewer: an engineer who checks code for bugs, gaps, "
+                "and risks. Review the developer's build against the task: every "
+                "change on its branch, uncommitted files too, and run the tests and "
+                "checks you can. Approve it if it is good to keep; else ask for "
+                "changes, and say exactly what and why. Do not change the code.",
+                multi=True,
+                fresh=True,
+            ),
+        },
+        stages={
+            "build": Stage(
+                "The developer builds the change, and the reviewers review the build.",
+                {
+                    "developer": (
+                        "a summary of your work: its branch, its worktree, and what changed"
+                    ),
+                    "reviewer": "your review",
+                },
+                Loop(
+                    "the reviewers approve the build, or the developer refuses the "
+                    "changes they ask for",
+                    max_rounds=5,
+                ),
+                together=True,
             ),
         },
         count=3,
@@ -309,10 +411,12 @@ MODES: dict[str, Mode] = {
 # it adds to the room: str.format templates. A typed text starts with a letter, since a
 # "/" or "!" there is a command in the tools. It ends in a way no other text does
 # (step_end, or a room id), since pantheon finds a short paste on the screen by its end.
-# A prompt is header; then, in an agent's first prompt only, who, its role, task, team,
-# plan, how, facts, room, and earlier (when the room has posts); then turn, came_in and
-# work (once there are results); commands (in later prompts, since the agent keeps its
-# context); result or results (with halt in a loop, or go); and step_end.
+# A prompt is header; then, in an agent's first prompt only, who, again (in a later
+# generation), its role, task, team, plan, how, facts, room, and earlier (when the room
+# has posts); then turn, came_in (or came_in_all, in a stage whose agents work
+# together) and work (once there are results); commands (in later prompts, since the
+# agent keeps its context); result or results (with halt or halt_together in a loop,
+# go, or pick); and step_end.
 PROMPTS = {
     "header": "Pantheon step {step}, for {agent}.",
     "who": (
@@ -321,22 +425,40 @@ PROMPTS = {
         "passes the room's posts to all of them. It makes no decisions: the team does, "
         "and the user has the last word."
     ),
+    # Results under its own name that it does not remember would puzzle it.
+    "again": (
+        "You are generation {n} of {agent}: you start fresh, and earlier generations "
+        "took your earlier turns, with a context you do not have. Their results and "
+        "posts under your name are in the room and in the results below; read what "
+        "you need."
+    ),
     "task": "The task:\n\n{task}",
     "team": "The team:\n\n{lines}",
     "team_line": "- {agent} ({role}{track}): {spec}{you}",
     "you": " (that is you)",
     "plan": (
         "The plan: {help}. Pantheon gives each agent its turns, one stage at a time: a "
-        "stage starts when the stage before it is done on every track.\n\n{stages}"
+        "stage starts once the stage before it is done, on each track it runs on."
+        "\n\n{stages}"
     ),
-    "plan_stage": "{n}. {stage}: {agents}{where}. {goal}{loop}{go}",
+    "plan_stage": "{n}. {stage}: {agents}{where}. {goal}{loop}{go}{pick}",
     "then": ", then ",
     "on_tracks": ", on each track",
+    "on_pick": ", on the picked track",
+    "at_once": "every {agent} at once",  # a multi agent in a stage that works together
     "plan_loop": (
         " They take turns in rounds until this is true: {until}; at most {max} "
         "round{s}."
     ),
+    "plan_together": (
+        " A turn that several agents take at once halts the loop only if all of them "
+        "halt it."
+    ),
     "plan_go": " The plan goes on only if this is true: {go_if}; else it ends here.",
+    "plan_pick": (
+        " Its agent picks {pick}: the stages after it run on that track alone, and a "
+        "stop ends the plan here."
+    ),
     "how": (
         "How to work: the plan is where the work starts, not a fence. If you see a "
         "reason to act outside your turns (a question about your work, a problem in "
@@ -387,6 +509,9 @@ PROMPTS = {
     "round": " round {round}",  # in a turn's label, as in "build round 2, track 1"
     "track": ", track {track}",
     "came_in": "It is your turn since {agent} wrote {path}.",
+    # In a stage whose agents work together, the turn before can be several results.
+    "came_in_all": "It is your turn since all of these came in:\n\n{lines}",
+    "came_in_line": "- {agent}: {path} ({status})",
     "work": "Results so far that you may need, track by track, oldest first:\n\n{lines}",
     "work_line": "- {label}, by {agent}: {path} ({status})",
     "work_note": "- {note}",  # how a loop ended: halted or out_of_rounds
@@ -403,8 +528,19 @@ PROMPTS = {
         "Write halt if this is now true: {until}. Else write continue. This is round "
         "{round} of at most {max}."
     ),
+    # For a multi agent whose instances take the turn at once: each one votes.
+    "halt_together": (
+        "Write halt if, for your part, this is now true: {until}. Else write "
+        "continue. Every {agent} takes this turn at once, and the loop halts only if "
+        "all of them write halt. This is round {round} of at most {max}."
+    ),
     "go": (
         "Write go if this is true: {go_if}. Else write stop: the plan ends here, and "
+        "the stages after this one do not start."
+    ),
+    "pick": (
+        "Write track-N for {pick}, where N is the track's number: the stages after "
+        "this one run on that track alone. Else write stop: the plan ends here, and "
         "the stages after this one do not start."
     ),
     "step_end": "(End of step {step}.)",
@@ -427,6 +563,7 @@ PROMPTS = {
     "halted": "{label}: {agent} halted it in round {round}.",
     "out_of_rounds": "{label}: it ran out of rounds ({n}), and no one halted it.",
     "given_back": "{label} never reached it, so it gets that turn again, fresh.",
+    "retried": "{label} did not finish, so it gets that turn again, fresh.",
     "done": "The plan is done. Its last result{s}: {results}.",
     "done_result": "{name}, by {agent}",
     "stopped": "The plan stopped after {stage}. Read why in {results}.",
@@ -440,9 +577,9 @@ PROMPTS = {
 # ---------------------------------------------------------------------- tools and efforts
 
 # The tools pantheon runs, in the order it picks them: the agents setting's default.
-# -a N takes the first N that can run here. Each multi agent takes them in that order,
-# one per track, and each single agent the first, unless the scramble setting gives
-# each agent its own order. An agent's model and effort come from the tool's own
+# -a N takes the first N that can run here. Each multi agent has an instance for each,
+# in that order, and each single agent takes the first, unless the scramble setting
+# gives each agent its own order. An agent's model and effort come from the tool's own
 # config, unless a SPEC or an effort level sets them.
 TOOLS = ("claude", "codex", "gemini", "ollama")  # SPEC: TOOL[:MODEL][@EFFORT]
 
@@ -477,11 +614,10 @@ EFFORTS = {
 }
 
 # The effort words each tool takes. Pantheon checks them because the tools check late:
-# claude only warns on stderr, and codex fails on the first turn.
+# claude only warns on stderr, and codex fails on the first turn. Gemini takes none.
 TOOL_EFFORTS = {
     "claude": ("low", "medium", "high", "xhigh", "max", "ultracode"),
     "codex": ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
-    "gemini": (),
     "ollama": ("low", "medium", "high", "xhigh", "max"),  # claude passes them on
 }
 
@@ -506,6 +642,9 @@ SETTINGS = {
     "disable_gemini": Setting(False, "keep gemini agents out of new sessions"),
     "disable_ollama": Setting(False, "keep ollama agents out of new sessions"),
     "ollama_url": Setting("", "the ollama server (empty: $OLLAMA_HOST, else local)"),
+    "ollama_remote": Setting(
+        False, "allow an ollama server on another machine, which gets your keys"
+    ),
     "ollama_model": Setting("", "a plain ollama's model, unless ollama_models has one"),
     "ollama_models": Setting(
         {}, "a model per level, like low=qwen3.5:4b,max=qwen3.8:27b"
@@ -669,7 +808,6 @@ CLAUDE_PROVIDERS = (
 
 # ------------------------------------------------------------------------------- patterns
 
-NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")  # agent names: tmux targets, widget ids
 MODE_NAME_RE = re.compile(r"[a-z](?:[a-z-]*[a-z])?")  # a mode's agents and stages
 ANSI_RE = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]")
 TYPED_NOISE_RE = re.compile(r"[\s│┃┆┊╎╏|]+")  # wrapping and box edges in an input box
@@ -728,7 +866,7 @@ CREATE TABLE picks (                        -- --agent ROLE=SPEC
 
 CREATE TABLE agents (                       -- one per instance, made for its first turn
     id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,              -- <role>-<key>, e.g. engineer-reviewer-codex
+    name TEXT NOT NULL UNIQUE,              -- <role>-<key>, e.g. reviewer-codex
     role TEXT NOT NULL DEFAULT '',          -- the mode's agent it is an instance of
     tool TEXT NOT NULL DEFAULT '',          -- claude, codex, gemini, or ollama
     model TEXT NOT NULL DEFAULT '',
@@ -746,7 +884,7 @@ CREATE TABLE steps (                        -- one per turn
     agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
     stage TEXT NOT NULL DEFAULT '',
     round INTEGER NOT NULL DEFAULT 0,       -- 1 to max_rounds in a loop; 0: none
-    track INTEGER NOT NULL DEFAULT 0,       -- 1 to N in a stage with tracks; 0: none
+    track INTEGER NOT NULL DEFAULT 0,       -- 1 to N: the track, or the instance in a together stage; 0: none
     name TEXT NOT NULL DEFAULT '',          -- the result's file name, e.g. 01-architect-claude.md
     prompt TEXT NOT NULL DEFAULT '',        -- what pantheon typed into the agent
     result TEXT NOT NULL DEFAULT '',        -- what the agent wrote: the turn's artifact
@@ -1028,6 +1166,9 @@ def gemini_model(native_id: str) -> str:
 
 
 def launch_ollama(s: Session, a: AgentRun) -> tuple[list[str], dict]:
+    # Checked again here: a reopen can bring another config or OLLAMA_HOST.
+    if why := ollama_problem(s.cfg):
+        raise OSError(why)
     model = a.model  # resolve_roster fills it in from ollama_models or ollama_model
     token_env = setting(s.cfg, "ollama_token_env")
     route = {
@@ -1070,7 +1211,7 @@ class TmuxError(Exception):
     pass
 
 
-def die(message: str) -> None:
+def die(message: str) -> NoReturn:
     raise SystemExit(f"pantheon: {message}")
 
 
@@ -1454,7 +1595,6 @@ def read_config_file() -> dict:
         return {}
     except (OSError, ValueError) as e:
         die(f"cannot read {CONFIG_PATH} ({e}); fix it, or delete it to start over")
-        return {}
 
 
 def read_settings() -> tuple[dict, dict[str, str]]:
@@ -1547,6 +1687,31 @@ def ollama_server(cfg: dict) -> str:
     return url.replace("://0.0.0.0", "://127.0.0.1")
 
 
+def on_this_machine(url: str) -> bool:
+    """Whether a URL's host is this machine, by its name or by a local address."""
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.is_loopback or addr.is_unspecified
+
+
+def ollama_problem(cfg: dict) -> str:
+    """Why ollama agents may not use the ollama server, or "". One on another machine
+    gets their token, and any Console API key claude keeps, so it needs your yes."""
+    server = ollama_server(cfg)
+    if on_this_machine(server) or setting(cfg, "ollama_remote"):
+        return ""
+    return (
+        f"{server} is not on this machine, and an ollama agent sends it your ollama "
+        "token and any Console API key claude keeps; to allow that: pantheon config "
+        "set ollama_remote true"
+    )
+
+
 def gemini_home() -> Path:
     return Path(os.environ.get("GEMINI_CLI_HOME") or Path.home()) / ".gemini"
 
@@ -1574,7 +1739,7 @@ def tool_problems(cfg: dict) -> dict[str, str]:
             if not (shutil.which("ollama") or named):
                 out[tool] = "not installed, and no ollama_url or OLLAMA_HOST is set"
             else:
-                out[tool] = ""
+                out[tool] = ollama_problem(cfg)
         elif not shutil.which(tool):
             out[tool] = "not installed"
         else:
@@ -1946,7 +2111,7 @@ def cmd_agents(cfg: dict, args) -> None:
         print(f"pantheon: {title}")
         width = max(map(len, [*mode.agents, *(r[0] for r in roster)]))
         for name, keys in players(mode, roster, picks).items():
-            each = " (one on each track)" if mode.agents[name].multi else ""
+            each = " (one for each tool)" if mode.agents[name].multi else ""
             print(f"  {name:<{width}} {', '.join(keys)}{each}")
         if setting(cfg, "scramble"):
             print(
@@ -1995,7 +2160,7 @@ def cmd_pool(cfg: dict, workdir: str) -> None:
     print("effort levels (a mode's, or start --effort LEVEL):")
     for level, cells in EFFORTS.items():
         for i, tool in enumerate(TOOLS):
-            model, effort = cells.get(tool, ("", ""))
+            model, effort = cells[tool]
             if tool == "ollama":
                 model = model or ollama_model_for(cfg, level)
             flags = shown_flags(tool, model, effort)
@@ -2075,14 +2240,34 @@ def take_lock(db: sqlite3.Connection, slug: str) -> None:
 
 
 def install_key() -> bytes:
-    """This install's secret. It signs the session files the install creates."""
+    """This install's secret. It signs the session files the install creates. Made only
+    when there is none: a new key turns each session the old one signed read-only."""
     path = HOME / "key"
     try:
-        return bytes.fromhex(path.read_text().strip())
-    except (OSError, ValueError):
-        key = os.urandom(32)
-        write_private(path, key.hex() + "\n")
-        return key
+        text = path.read_text(errors="replace")
+    except FileNotFoundError:
+        # Linked into place, so a pantheon that starts at the same time finds no key or
+        # all of one, and both keep the first.
+        fd, tmp = tempfile.mkstemp(dir=HOME, prefix=".key.")  # mode 0600
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(os.urandom(32).hex() + "\n")
+            os.link(tmp, path)
+        except FileExistsError:
+            pass
+        finally:
+            os.unlink(tmp)
+        text = path.read_text(errors="replace")
+    try:
+        key = bytes.fromhex(text)
+    except ValueError:
+        key = b""
+    if len(key) != 32:
+        raise ValueError(
+            f"{path} holds no pantheon key; delete it to make a new one, and the "
+            "sessions the old one signed open read-only"
+        )
+    return key
 
 
 def session_origin(slug: str, created_at: str) -> str:
@@ -2279,7 +2464,7 @@ def resolve_roster(
                 f"{tool} takes effort {', '.join(TOOL_EFFORTS[tool])}, not {effort!r}"
             )
         # Your SPEC's parts win, the level fills the blanks, and the tool does the rest.
-        cell = EFFORTS[level].get(tool, ("", "")) if level else ("", "")
+        cell = EFFORTS[level][tool] if level else ("", "")
         model, effort = model or cell[0], effort or cell[1]
         if tool == "ollama" and not model:
             model = ollama_model_for(cfg, level)
@@ -2311,7 +2496,7 @@ def resolve_roster(
         name, sep, spec = (x.strip() for x in item.partition("="))
         if name in mode.agents and name not in singles:
             raise PrepError(
-                f"{name} has an instance on each track, so -a gives its tools, not "
+                f"{name} has an instance for each tool, so -a gives its tools, not "
                 "--agent"
             )
         if not sep or not spec or name not in singles:
@@ -2348,9 +2533,8 @@ def parse_remote(url: str) -> tuple[str, str]:
     u = urllib.parse.urlsplit(url)  # drops the user part, which can hold a token
     if u.hostname:
         return u.hostname, u.path.strip("/").removesuffix(".git")
-    raise PrepError(
-        "cannot read the origin remote"
-    )  # never echo it: it can hold a token
+    # Never echo it: it can hold a token.
+    raise PrepError("cannot read the origin remote")
 
 
 def forge_error(tool: str, rc: int, err: str) -> PrepError:
@@ -2506,7 +2690,14 @@ def prepare(
     slug = make_slug(first_line(title, 60) if title else req.mode)
     # A copy of the setting: changing it later must not reshuffle a running session.
     scramble = bool(setting(cfg, "scramble"))
-    db = connect(db_path(slug), "rwc")
+    # Made here, and only if new, so the cleanup below never deletes another start's.
+    try:
+        os.close(os.open(db_path(slug), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
+        raise PrepError(
+            f"another start took the name {slug} just now; try again"
+        ) from None
+    db = connect(db_path(slug))
     try:
         db.executescript(
             f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
@@ -2553,8 +2744,12 @@ def prepare(
             db.execute(
                 "INSERT INTO events (at, kind, text) VALUES (?, 'note', ?)", (now, text)
             )
-    finally:
+    except BaseException:
         db.close()
+        # A file with no session row is never listed, so prune would never delete it.
+        db_path(slug).unlink(missing_ok=True)
+        raise
+    db.close()
     return slug, notes
 
 
@@ -2562,8 +2757,38 @@ def prepare(
 
 
 def on_tracks(mode: Mode, stage: Stage) -> bool:
-    """Whether a stage runs on each track: one of its agents is multi."""
-    return any(mode.agents[name].multi for name in stage.agents)
+    """Whether a stage runs on each track: one of its agents is multi, and they do not
+    work together."""
+    return not stage.together and any(mode.agents[name].multi for name in stage.agents)
+
+
+def walk_lane(
+    mode: Mode, st: Stage, tracks: int, lane: int, steps: list
+) -> tuple[list[tuple[int, int, str]], bool, list]:
+    """Where a stage is on a lane (a track, or 0 in a stage with no tracks), from its
+    steps there so far, oldest first, as rows that start with track and status: the
+    turns to start, as (track, round, agent); whether a turn is open; and, once the
+    lane is done, the steps of the turn that halted its loop, if one did. In each
+    round, each agent takes a turn, in order; together, a multi agent's turn is one
+    for each of its instances, at once, and halts the loop only if all of them halt
+    it. round is 0 outside a loop."""
+    rounds = st.loop.max_rounds if st.loop else 1
+    i = 0
+    for rnd in range(1, rounds + 1):
+        for role in st.agents:
+            group = [lane]
+            if st.together and mode.agents[role].multi:
+                group = list(range(1, tracks + 1))
+            # A turn's steps are made together, so they come in a row.
+            mine, i = steps[i : i + len(group)], i + len(group)
+            seen = {s[0] for s in mine}
+            start = [(t, rnd if st.loop else 0, role) for t in group if t not in seen]
+            busy = any(s[1] == "open" for s in mine)
+            if start or busy:
+                return start, busy, []
+            if all(s[1] == "halt" for s in mine):
+                return [], False, mine
+    return [], False, []
 
 
 def plan_turns(
@@ -2571,26 +2796,28 @@ def plan_turns(
 ) -> list[tuple[str, int, int, str]] | None:
     """The turns the plan asks for now, from the steps so far as (stage, track,
     status), oldest first: (stage, track, round, agent) for each, or None once the plan
-    is done. The first stage not done on every track is the one under way. On each of
-    its tracks, its agents take turns in order, in a loop round after round, until one
-    halts it or the rounds run out. round is 0 outside a loop. A stage done with a stop
-    in it ends the plan."""
+    is done. The first stage not done on every lane is the one under way (see
+    walk_lane). A stage done with a stop in it ends the plan, and one that picks a
+    track runs the later stages on that track alone."""
+    picked = 0
     for name, st in mode.stages.items():
-        agents = list(st.agents)
-        rounds = st.loop.max_rounds if st.loop else 1
+        mine = [(t, status) for stage, t, status in steps if stage == name]
+        lanes = [0]
+        if on_tracks(mode, st):
+            lanes = [picked] if picked else list(range(1, tracks + 1))
         turns, busy = [], False
-        for track in range(1, tracks + 1) if on_tracks(mode, st) else [0]:
-            mine = [status for stage, t, status in steps if (stage, t) == (name, track)]
-            if "open" in mine:
-                busy = True
-            elif "halt" not in mine and len(mine) < rounds * len(agents):
-                i = len(mine)
-                rnd = i // len(agents) + 1 if st.loop else 0
-                turns.append((name, track, rnd, agents[i % len(agents)]))
+        for lane in lanes:
+            here = [s for s in mine if s[0] == lane] if lane else mine
+            start, open_, _ = walk_lane(mode, st, tracks, lane, here)
+            turns += [(name, t, rnd, role) for t, rnd, role in start]
+            busy = busy or open_
         if turns or busy:
             return turns
-        if any((stage, status) == (name, "stop") for stage, _, status in steps):
+        statuses = [status for _, status in mine]
+        if "stop" in statuses:
             return None
+        if st.pick:  # its one turn ended with track-N
+            picked = int(statuses[-1].removeprefix("track-"))
     return None
 
 
@@ -2598,6 +2825,12 @@ def turn_label(stage: str, rnd: int, track: int) -> str:
     """A turn as the prompts and the room name it, e.g. build round 2, track 1."""
     label = stage + (PROMPTS["round"].format(round=rnd) if rnd else "")
     return label + (PROMPTS["track"].format(track=track) if track else "")
+
+
+def after_pick(mode: Mode, stage: str) -> bool:
+    """Whether a stage comes after one that picks a track."""
+    names = list(mode.stages)
+    return any(mode.stages[n].pick for n in names[: names.index(stage)])
 
 
 def plan_text(mode: Mode) -> str:
@@ -2610,25 +2843,37 @@ def plan_text(mode: Mode) -> str:
             loop = PROMPTS["plan_loop"].format(
                 until=st.loop.until, max=n_max, s="" if n_max == 1 else "s"
             )
-        go = PROMPTS["plan_go"].format(go_if=st.go_if) if st.go_if else ""
+            loop += PROMPTS["plan_together"] if st.together else ""
+        where = ""
+        if on_tracks(mode, st):
+            where = PROMPTS["on_pick" if after_pick(mode, name) else "on_tracks"]
+        agents = [
+            PROMPTS["at_once"].format(agent=role)
+            if st.together and mode.agents[role].multi
+            else role
+            for role in st.agents
+        ]
         lines.append(
             PROMPTS["plan_stage"].format(
                 n=n,
                 stage=name,
-                agents=PROMPTS["then"].join(st.agents),
-                where=PROMPTS["on_tracks"] if on_tracks(mode, st) else "",
+                agents=PROMPTS["then"].join(agents),
+                where=where,
                 goal=st.goal,
                 loop=loop,
-                go=go,
+                go=PROMPTS["plan_go"].format(go_if=st.go_if) if st.go_if else "",
+                pick=PROMPTS["plan_pick"].format(pick=st.pick) if st.pick else "",
             )
         )
     return PROMPTS["plan"].format(help=mode.help, stages="\n".join(lines))
 
 
-def statuses_of(stage: Stage) -> tuple[str, ...]:
+def statuses_of(stage: Stage, tracks: int) -> tuple[str, ...]:
     """The PANTHEON lines a turn in the stage may end with."""
     if stage.loop:
         return ("continue", "halt")
+    if stage.pick:
+        return (*(f"track-{t}" for t in range(1, tracks + 1)), "stop")
     return ("go", "stop") if stage.go_if else ("done",)
 
 
@@ -2697,9 +2942,8 @@ class Tmux:
         self.base = [path, "-L", name, "-f", conf]
         tmpdir = os.environ.get("TMUX_TMPDIR") or "/tmp"
         self.socket = Path(tmpdir) / f"tmux-{os.getuid()}" / name
-        self.env = (
-            env  # the server takes its environment from the command that starts it
-        )
+        # The server takes its environment from the command that starts it.
+        self.env = env
 
     async def run(
         self, *args: str, data: bytes | None = None, check: bool = True
@@ -2834,6 +3078,7 @@ class AgentRun:
     saw_work: bool = False  # gemini showed its working title since its last turn ended
     in_turn: bool = False  # from a prompt to its Stop: tool hooks count only then
     ran: tuple[str, str] = ("", "")  # the model and effort it reports, as last known
+    no_effort: bool | None = None  # claude_sends_no_effort, once read
     last_message: str = ""
     # What to type once the agent is idle, oldest first. A reopen rebuilds it from the
     # file, in room order: the unsent step, and the posts after heard.
@@ -2843,6 +3088,7 @@ class AgentRun:
     posted: bool = False  # it posted to the room since pantheon typed it a turn
     answering: bool = False  # its turn is for a room post: any answer goes in the room
     hooked: bool = False  # a hook came from it: claude sends none until its dialogs end
+    generation: int = 0  # how many times it started; each restart makes a new one
     waiting_since: float = 0.0  # when pantheon first found no input box to type into
 
 
@@ -2944,7 +3190,7 @@ class Session:
         self.tmux = Tmux(tmux_path(), tmux_name(slug), str(conf), clean_env())
         self.closed = False
         self.driving = not self.foreign  # false too once another pantheon takes over
-        self.stopping = False  # stop_agents is tearing the agents down
+        self.ending = False  # you ended the session; the engine stops the agents
         self.launch_failed: set[str] = set()  # retried when the session is reopened
         self.checked_server = False
         self.attached = ""  # the agent you are transported into
@@ -2967,12 +3213,14 @@ class Session:
 
     def restore(self, a: AgentRun) -> None:
         """Rebuild what pantheon keeps in memory for an agent, after a reopen."""
+        a.generation = self.db.execute(
+            "SELECT COUNT(*) FROM events WHERE agent_id = ? AND kind = 'start'", (a.id,)
+        ).fetchone()[0]
         if a.state == "starting":
             a.launched = time.time()  # so the startup watchdog still fires
         if a.tool == "gemini" and a.state in ("working", "needs_you"):
-            a.saw_work = (
-                True  # its next ◇ title ends the turn, even one ended while closed
-            )
+            # Its next ◇ title ends the turn, even one that ended while closed.
+            a.saw_work = True
         if a.state == "needs_you":
             row = self.db.execute(
                 "SELECT data FROM events WHERE agent_id = ? AND kind = 'needs'"
@@ -3010,23 +3258,17 @@ class Session:
         if a.state in ("new", "exited"):
             return
         # What was not typed into it yet, in room order: each post after heard but its
-        # own, and its turn (unless the session stopped) ahead of the posts made after
-        # its prompt. Launch sets heard to the newest post, so a first prompt (with the
-        # earlier posts in it) goes before every post.
-        rows = self.db.execute(
-            "SELECT id, text, data FROM events WHERE kind = 'say' AND id > ?"
-            " AND agent_id IS NOT ? ORDER BY id",
-            (a.heard, a.id),
-        )
-        for r in rows:
-            sender = json.loads(r["data"]).get("from", "you")
-            a.outbox.append(self.post_item(a, r["id"], sender, r["text"]))
+        # own, and its turn ahead of the posts made after its prompt; in a stopped
+        # session too, which types a turn it gave out already, and which Resume finds
+        # in place. Launch sets heard to the newest post before its first prompt,
+        # which has the earlier posts in it, so that prompt goes before every post.
+        self.queue_posts(a)
         step = self.db.execute(
             "SELECT id, prompt FROM steps WHERE agent_id = ? AND status = 'open'"
             " AND sent = 0",
             (a.id,),
         ).fetchone()
-        if step is None or self.state not in ("running", "needs_you"):
+        if step is None:
             return
         prompt = self.db.execute(
             "SELECT id FROM events WHERE kind = 'prompt' AND agent_id = ?"
@@ -3113,6 +3355,11 @@ class Session:
     def result_path(self, step) -> str:
         return os.path.join(self.scratch, step["name"])
 
+    def lane(self, stage: str, track: int) -> int:
+        """A step's lane: its track, in a stage on tracks; else 0. In a stage whose
+        agents work together, track only tells a multi agent's instances apart."""
+        return 0 if self.mode.stages[stage].together else track
+
     def result_of(self, step) -> tuple[str, str, str | None]:
         """The step's status, the problem with its result file, and the file's text."""
         raw = read_agent_file(self.result_path(step))
@@ -3151,8 +3398,10 @@ class Session:
             return None, ""
         if len(rows) == 1:
             r = rows[0]
-            label = turn_label(r["stage"], r["round"], r["track"])
-            return self.agent_by_id(r["agent_id"]), label
+            lane = self.lane(r["stage"], r["track"])
+            return self.agent_by_id(r["agent_id"]), turn_label(
+                r["stage"], r["round"], lane
+            )
         stages = {r["stage"] for r in rows}
         where = f"{rows[0]['stage']}: " if len(stages) == 1 else ""
         return None, f"{where}{len(rows)} turns under way"
@@ -3161,10 +3410,12 @@ class Session:
         return [a for a in self.agents.values() if a.state not in ("new", "exited")]
 
     def asks(self) -> int:
-        """How many agents wait on you: they need you, or wait for an answer in the
-        room."""
+        """How many things wait on you: agents that need you, wait for an answer in
+        the room, or could not start, and a stopped session's Resume."""
         agents = self.agents.values()
-        return sum(a.state == "needs_you" or a.reason == ROOM_WAIT for a in agents)
+        waits = sum(a.state == "needs_you" or a.reason == ROOM_WAIT for a in agents)
+        waits += len(self.launch_failed)  # until you fix it and reopen the session
+        return waits + (self.state == "stopped" and self.driving)
 
     # -- the loop
 
@@ -3187,7 +3438,11 @@ class Session:
             await asyncio.sleep(0.25)
 
     async def tick(self) -> None:
-        if self.stopping:
+        if self.ending:  # here, so that no tick runs beside the stop
+            self.ending = False
+            await self.stop_agents()
+            self.set_session_state("ended")
+            self.event("note", "Ended the session and stopped its agents.")
             return
         now = time.time()
         if now - self.last_beat >= 5:
@@ -3250,24 +3505,32 @@ class Session:
         rows = self.db.execute(
             "SELECT id, agent, payload FROM hooks ORDER BY id LIMIT 500"
         ).fetchall()
-        if not rows:
-            return
-        self.db.execute("DELETE FROM hooks WHERE id <= ?", (rows[-1]["id"],))
+        failed = None
         for row in rows:
+            # One at a time, so a hook that fails loses only itself.
+            self.db.execute("DELETE FROM hooks WHERE id = ?", (row["id"],))
             a = self.agents.get(row["agent"])
             try:
                 ev = json.loads(row["payload"])
             except ValueError:
                 continue
-            if a is not None and isinstance(ev, dict):
+            if a is None or not isinstance(ev, dict):
+                continue
+            try:
                 self.on_hook(a, ev)
+            except Exception as e:
+                failed = failed or e
+        if failed is not None:
+            raise failed  # once the rest are done; run puts it in the room
 
     def on_hook(self, a: AgentRun, ev: dict) -> None:
         name = ev.get("hook_event_name", "")
         self.event("hook", name, a, compact_hook(ev))
-        a.hooked = True
-        if a.state == "exited":
+        # No process of its own runs, so the hook is an earlier one's, and must not
+        # let pantheon type into the next one's startup dialog.
+        if a.state in ("new", "exited"):
             return
+        a.hooked = True
         # A subagent's hooks, or those of a thread of the tool's own (codex's memories),
         # have no transcript of the agent's: they name another model and effort.
         if not ev.get("agent_id") and ev.get("transcript_path"):
@@ -3297,10 +3560,13 @@ class Session:
         elif name == "Stop":
             a.last_message = ev.get("last_assistant_message") or ""
             # Claude may leave a background task (a dev server) running for good, so
-            # wait for it only while the step's result is not ready.
+            # wait for it only while the turn's step has no result yet. A turn with no
+            # step has none to wait for.
             step = self.open_step(a, sent_only=True)
-            if ev.get("background_tasks") and (
-                step is None or not self.result_of(step)[0]
+            if (
+                ev.get("background_tasks")
+                and step is not None
+                and not self.result_of(step)[0]
             ):
                 return
             a.in_turn = False
@@ -3318,8 +3584,11 @@ class Session:
             model = None  # a subagent's compaction sends its model, with no agent_id
         effort = ev.get("effort")
         level = effort.get("level") if isinstance(effort, dict) else None
-        if level == "high" and claude_sends_no_effort(a, self.workdir):
-            level = None
+        if level == "high":
+            if a.no_effort is None:  # once: it reads up to five settings files
+                a.no_effort = claude_sends_no_effort(a, self.workdir)
+            if a.no_effort:
+                level = None
         self.note_ran(a, model, level)
 
     def note_ran(self, a: AgentRun, model=None, effort=None) -> None:
@@ -3432,26 +3701,29 @@ class Session:
             self.event("note", note)
 
     def loop_end(self, stage: str, track: int) -> str:
-        """How a stage's loop ended on a track, as a room line, or "" while it goes on
-        (or the stage has no loop)."""
-        loop = self.mode.stages[stage].loop
-        if loop is None:
+        """How a stage's loop ended on a step's lane, as a room line, or "" while it
+        goes on (or the stage has no loop)."""
+        st = self.mode.stages[stage]
+        if st.loop is None:
             return ""
+        lane = self.lane(stage, track)
         rows = self.db.execute(
-            "SELECT s.round, s.status, a.name FROM steps s JOIN agents a"
-            " ON a.id = s.agent_id WHERE s.stage = ? AND s.track = ? ORDER BY s.id",
-            (stage, track),
+            "SELECT s.track, s.status, s.round, a.name FROM steps s JOIN agents a"
+            " ON a.id = s.agent_id WHERE s.stage = ? ORDER BY s.id",
+            (stage,),
         ).fetchall()
-        label = turn_label(stage, 0, track)
-        if rows and rows[-1]["status"] == "halt":
-            last = rows[-1]
+        here = [r for r in rows if r["track"] == lane] if lane else rows
+        start, busy, halted = walk_lane(self.mode, st, len(self.keys), lane, here)
+        if start or busy:
+            return ""
+        label = turn_label(stage, 0, lane)
+        if halted:
             return PROMPTS["halted"].format(
-                label=label, agent=last["name"], round=last["round"]
+                label=label,
+                agent=name_list([r["name"] for r in halted]),
+                round=halted[0]["round"],
             )
-        turns = loop.max_rounds * len(self.mode.stages[stage].agents)
-        if len(rows) >= turns and "open" not in (r["status"] for r in rows):
-            return PROMPTS["out_of_rounds"].format(label=label, n=loop.max_rounds)
-        return ""
+        return PROMPTS["out_of_rounds"].format(label=label, n=st.loop.max_rounds)
 
     async def poll_panes(self) -> None:
         if not self.live_agents():
@@ -3487,8 +3759,6 @@ class Session:
             a.title = title
 
     def exited(self, a: AgentRun, status: str, tail: str = "") -> None:
-        if self.stopping:  # stop_agents is ending it on purpose
-            return
         step = self.open_step(a, sent_only=True)
         if step is not None and self.result_of(step)[0]:
             if a.tool == "gemini":  # it exited before its ◇ title could end the turn
@@ -3524,12 +3794,15 @@ class Session:
         note = "exited" + (f" with status {status}" if status else "")
         self.event("note", note + (f":\n{tail}" if tail else ""), a)
         for step in unsent if give_back else []:
-            label = turn_label(step["stage"], step["round"], step["track"])
+            lane = self.lane(step["stage"], step["track"])
+            label = turn_label(step["stage"], step["round"], lane)
             self.event("note", PROMPTS["given_back"].format(label=label), a)
         if self.open_step(a) is not None and going:
             self.set_session_state("stopped")
             self.event(
-                "error", f"{a.name} exited during its turn, so the session stopped."
+                "error",
+                f"{a.name} exited during its turn, so the session stopped.",
+                data={"resume": True},  # its room entry has a Resume button
             )
         self.refresh_session_state()
 
@@ -3588,11 +3861,14 @@ class Session:
             if not text:
                 self.event("error", f"could not read the room post {name}")
                 continue
-            self.post(sender if NAME_RE.fullmatch(sender) else "someone", text)
+            # Only pantheon's window posts as you: agents can write here, and can pass
+            # say any --from.
+            self.post(sender if sender in self.agents else "someone", text)
 
     def post(self, sender: str, text: str) -> None:
         """Put a post in the room, and give it to every other agent that runs, which
-        decides whether it needs to act. sender: an agent's name, or you."""
+        decides whether it needs to act. sender: an agent's name, someone, or you (from
+        pantheon's window alone)."""
         a = self.agents.get(sender)
         event_id = self.event("say", text, a, {"from": sender})
         if a is not None:
@@ -3634,20 +3910,40 @@ class Session:
             return
         for stage, track, rnd, role in turns:
             a = self.agent_for(role, track)
-            if a.state == "exited":
-                if a.name == self.attached:  # you are still in its screen
-                    continue
-                a = await self.restart(a)
             if self.open_step(a) is not None:  # a single agent: one track at a time
                 continue
+            if a.state == "exited" or self.renews(a):
+                if a.name == self.attached:  # you are still in its screen
+                    continue
+                # It answers a post, or one is on its way to it: wait. (An exit
+                # empties both.)
+                if a.state not in ("idle", "exited") or a.pasting or a.outbox:
+                    continue
+                a = await self.restart(a)
             row = self.create_step(stage, track, rnd, a)
             if self.state in ("running", "needs_you"):
                 await self.dispatch(row)
 
+    def renews(self, a: AgentRun) -> bool:
+        """Whether a fresh agent (see Agent.fresh) starts again for its next turn: it
+        runs, and it started before. An agent pantheon never started runs nothing to
+        end."""
+        live = a.state not in ("new", "exited")
+        return self.mode.agents[a.role].fresh and live and a.generation > 0
+
     async def restart(self, a: AgentRun) -> AgentRun:
-        """Start again, fresh, an agent that exited after its last turn: under its own
-        name, with a first prompt, which has the posts it missed."""
+        """Start an agent again, fresh, under its own name, for its next turn: one that
+        exited after its last turn, or a fresh one, whose last run ends here. Its next
+        prompt is a first prompt, which has the posts it missed."""
+        if a.state != "exited":
+            await self.end_panes("-s", "-t", f"={a.name}")
         await self.tmux.run("kill-session", "-t", f"={a.name}", check=False)
+        return self.renew(a)
+
+    def renew(self, a: AgentRun) -> AgentRun:
+        """The record of an agent that starts again: a new generation, with nothing
+        heard, posted, or asked yet, and none of the hooks its last run left."""
+        self.db.execute("DELETE FROM hooks WHERE agent = ?", (a.name,))
         self.save_agent(
             a,
             state="new",
@@ -3658,8 +3954,13 @@ class Session:
             answering=False,
         )
         fresh = AgentRun(a.id, a.name, a.role, a.tool, a.model, a.effort, "", "new", "")
+        # The model it ran stays known, so each generation does not name it again.
+        fresh.generation, fresh.ran = a.generation, a.ran
         self.agents[a.name] = fresh
-        self.event("note", "starts again, fresh, for its next turn", fresh)
+        n = a.generation + 1
+        self.event(
+            "note", f"starts again, fresh, for its next turn: generation {n}", fresh
+        )
         return fresh
 
     def order(self, role: str) -> list[str]:
@@ -3714,7 +4015,7 @@ class Session:
         cur = self.db.execute(
             "INSERT INTO steps (agent_id, stage, round, track, statuses)"
             " VALUES (?, ?, ?, ?, ?)",
-            (a.id, stage, rnd, track, " ".join(statuses_of(st))),
+            (a.id, stage, rnd, track, " ".join(statuses_of(st, len(self.keys)))),
         )
         step_id = cur.lastrowid
         name = f"{step_id:02d}-{a.name}" + (f"-{rnd}" if rnd else "") + ".md"
@@ -3734,48 +4035,68 @@ class Session:
             (name, prompt, step_id),
         )
         # The label too: a turn given back (see exited) loses its step row.
-        label = turn_label(stage, rnd, track)
+        label = turn_label(stage, rnd, self.lane(stage, track))
         self.event("prompt", prompt, a, {"step": step_id, "label": label})
         return self.step(step_id)
 
     def turn_parts(self, a: AgentRun, stage: str, track: int, rnd: int) -> list[str]:
         """A turn's own part of its prompt: what to do, and the results so far it may
-        need. On a track, those are that track's and those of stages with no tracks;
-        in a stage with no tracks, all of them, with how each loop ended."""
+        need. On a track, those are that track's and those of stages with no tracks
+        (after a pick, every track's, since the picked build takes from the others);
+        with no track, all of them, with how each loop ended."""
         st = self.mode.stages[stage]
-        label = turn_label(stage, rnd, track)
+        lane = self.lane(stage, track)
+        label = turn_label(stage, rnd, lane)
         parts = [PROMPTS["turn"].format(label=label, goal=st.goal)]
         rows = self.db.execute(
-            "SELECT s.id, s.stage, s.round, s.track, s.name, s.status, a.name AS agent"
-            " FROM steps s JOIN agents a ON a.id = s.agent_id"
-            " WHERE s.status != 'open' ORDER BY s.track, s.id"
+            "SELECT s.id, s.stage, s.round, s.track, s.name, s.status,"
+            " a.name AS agent, a.role FROM steps s JOIN agents a ON a.id = s.agent_id"
+            " WHERE s.status != 'open' ORDER BY s.id"
         ).fetchall()
-        if track:
-            rows = [r for r in rows if r["track"] in (0, track)]
+        lanes = {r["id"]: self.lane(r["stage"], r["track"]) for r in rows}
+        rows.sort(key=lambda r: lanes[r["id"]])  # lane by lane, oldest first in each
+        if lane and not after_pick(self.mode, stage):
+            rows = [r for r in rows if lanes[r["id"]] in (0, lane)]
         if not rows:
             return parts
-        # The result that made it this agent's turn: on a track, the track's newest; in
-        # a stage with no tracks, the stage's own newest, once it has one.
-        before = rows if track else [r for r in rows if r["stage"] == stage]
+        # The results that made it this agent's turn: on a track, the track's newest;
+        # with no track, the stage's own newest, once it has one. Together, a turn is
+        # each instance's result: the newest by another agent, and the rest of its
+        # round and role.
+        before = rows if lane else [r for r in rows if r["stage"] == stage]
+        if st.together:
+            before = [r for r in before if r["role"] != a.role]
         newest = max(before, key=lambda r: r["id"], default=None)
-        if newest is not None and newest["agent"] != a.name:
-            path = self.result_path(newest)
-            parts.append(PROMPTS["came_in"].format(agent=newest["agent"], path=path))
+        came = [newest] if newest is not None and newest["agent"] != a.name else []
+        if st.together and came:
+            turn = (newest["round"], newest["role"])
+            came = [r for r in before if (r["round"], r["role"]) == turn]
+        if len(came) == 1:
+            path = self.result_path(came[0])
+            parts.append(PROMPTS["came_in"].format(agent=came[0]["agent"], path=path))
+        elif came:
+            each = [
+                PROMPTS["came_in_line"].format(
+                    agent=r["agent"], path=self.result_path(r), status=r["status"]
+                )
+                for r in came
+            ]
+            parts.append(PROMPTS["came_in_all"].format(lines="\n".join(each)))
         lines = []
         for i, r in enumerate(rows):
             lines.append(
                 PROMPTS["work_line"].format(
-                    label=turn_label(r["stage"], r["round"], r["track"]),
+                    label=turn_label(r["stage"], r["round"], lanes[r["id"]]),
                     agent=r["agent"],
                     path=self.result_path(r),
                     status=r["status"],
                 )
             )
             after = rows[i + 1] if i + 1 < len(rows) else None
-            group_ends = after is None or after["track"] != r["track"]
+            group_ends = after is None or lanes[after["id"]] != lanes[r["id"]]
             group_ends = group_ends or after["stage"] != r["stage"]
             if (
-                not track
+                not lane
                 and group_ends
                 and (end := self.loop_end(r["stage"], r["track"]))
             ):
@@ -3786,30 +4107,41 @@ class Session:
     def result_text(self, a: AgentRun, stage: str, rnd: int, path: str) -> str:
         """Where a turn's result goes, and the PANTHEON lines it may end with."""
         st = self.mode.stages[stage]
-        text = result_lines(st.agents[a.role], path, statuses_of(st))
+        statuses = statuses_of(st, len(self.keys))
+        text = result_lines(st.agents[a.role], path, statuses)
         if st.loop:
-            text += "\n\n" + PROMPTS["halt"].format(
-                until=st.loop.until, round=rnd, max=st.loop.max_rounds
+            # Instances that take the turn at once each vote on the halt.
+            each = st.together and self.mode.agents[a.role].multi and len(self.keys) > 1
+            text += "\n\n" + PROMPTS["halt_together" if each else "halt"].format(
+                until=st.loop.until, round=rnd, max=st.loop.max_rounds, agent=a.role
             )
         elif st.go_if:
             text += "\n\n" + PROMPTS["go"].format(go_if=st.go_if)
+        elif st.pick:
+            text += "\n\n" + PROMPTS["pick"].format(pick=st.pick)
         return text
 
     def intro(self, a: AgentRun) -> list[str]:
         """What an agent's first prompt starts with: who it is, its role, the task, the
         team, the plan, how to work, the facts, the room, and the posts made before it
         joined, since it gets only the later ones."""
-        parts = [PROMPTS["who"].format(agent=a.name), self.mode.agents[a.role].role]
+        parts = [PROMPTS["who"].format(agent=a.name)]
+        if a.generation:  # it ran before: this is its next generation
+            parts.append(PROMPTS["again"].format(n=a.generation + 1, agent=a.name))
+        parts.append(self.mode.agents[a.role].role)
         if self.task:
             parts.append(PROMPTS["task"].format(task=self.task))
         lines = []
+        # A mode with no stage on tracks gives its agents none to name.
+        tracked = any(on_tracks(self.mode, st) for st in self.mode.stages.values())
         for name, role, track, key in self.team():
             r = self.roster[key]
+            on = PROMPTS["track"].format(track=track) if track and tracked else ""
             lines.append(
                 PROMPTS["team_line"].format(
                     agent=name,
                     role=role,
-                    track=PROMPTS["track"].format(track=track) if track else "",
+                    track=on,
                     spec=spec_text(r["tool"], r["model"], r["effort"]),
                     you=PROMPTS["you"] if name == a.name else "",
                 )
@@ -3854,7 +4186,9 @@ class Session:
         if a is None or a.state == "exited":
             self.set_session_state("stopped")
             self.event(
-                "error", "The agent for the next turn is gone, so the session stopped."
+                "error",
+                "The agent for the next turn is gone, so the session stopped.",
+                data={"resume": True},
             )
             return
         if any(o.kind == "step" and o.step_id == step["id"] for o in a.outbox):
@@ -3904,19 +4238,43 @@ class Session:
                 a,
             )
             return False
-        # It gets the posts from now on; its first prompt has the older ones.
-        newest = self.db.execute(
-            "SELECT COALESCE(MAX(id), 0) FROM events WHERE kind = 'say'"
+        self.started(a, first, in_argv, exe)
+        return True
+
+    def started(self, a: AgentRun, first: Outgoing, in_argv: bool, exe: str) -> None:
+        """The agent runs now, from exe, with its first prompt in its command line
+        (in_argv) or in its outbox."""
+        # That prompt has the posts made before it, and the later ones follow it.
+        heard = self.db.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM events WHERE kind = 'say' AND id <"
+            " (SELECT id FROM events WHERE kind = 'prompt' AND agent_id = ?"
+            " AND json_extract(data, '$.step') = ?)",
+            (a.id, first.step_id),
         ).fetchone()[0]
-        self.save_agent(a, state="starting", reason="", heard=newest)
+        self.save_agent(a, state="starting", reason="", heard=heard)
         a.launched = time.time()
+        a.generation += 1  # a reopen counts the start events
+        # No hook of the new process came yet. A reopen before this start counts the
+        # last run's hooks, which must not let pantheon type into a startup dialog.
+        a.hooked = False
         spec = spec_text(a.tool, a.model, a.effort)
         self.event("start", f"joined ({spec}) from {short_home(exe)}", a)
         if in_argv:
             self.delivered(a, first)
         else:
             a.outbox.append(first)
-        return True
+        self.queue_posts(a)
+
+    def queue_posts(self, a: AgentRun) -> None:
+        """Queue each post after heard but the agent's own, oldest first."""
+        rows = self.db.execute(
+            "SELECT id, text, data FROM events WHERE kind = 'say' AND id > ?"
+            " AND agent_id IS NOT ? ORDER BY id",
+            (a.heard, a.id),
+        )
+        for r in rows:
+            sender = json.loads(r["data"]).get("from", "you")
+            a.outbox.append(self.post_item(a, r["id"], sender, r["text"]))
 
     def delivered(self, a: AgentRun, item: Outgoing) -> None:
         """The agent has item now, typed or in its command line."""
@@ -4061,8 +4419,8 @@ class Session:
         self.needs_you(a, "what pantheon typed did not start a turn")
 
     async def finish(self) -> None:
-        """The plan is done: name the last stage's results (each track's last), or the
-        ones that stopped it, and the agents that never had a turn."""
+        """The plan is done: name the last stage's results (each agent's last on each
+        track), or the ones that stopped it, and the agents that never had a turn."""
         self.set_session_state("done")
         rows = self.db.execute(
             "SELECT s.name, s.stage, s.track, s.status, a.name AS agent FROM steps s"
@@ -4070,7 +4428,7 @@ class Session:
         ).fetchall()
         stops = [r for r in rows if r["status"] == "stop"]
         last_stage = stops[0]["stage"] if stops else list(self.mode.stages)[-1]
-        last = {r["track"]: r for r in rows if r["stage"] == last_stage}
+        last = {(r["track"], r["agent"]): r for r in rows if r["stage"] == last_stage}
         shown = stops or list(last.values())
         results = ", ".join(
             PROMPTS["done_result"].format(name=r["name"], agent=r["agent"])
@@ -4112,6 +4470,26 @@ class Session:
         )
         a.outbox.append(Outgoing(text, "remind", step["id"]))
 
+    def resume(self) -> None:
+        """Go on with a stopped session: each turn that an agent that exited did not
+        finish goes back to the plan, which starts the agent again, fresh, for it."""
+        if self.state != "stopped" or not self.driving:
+            return
+        self.event("note", "You resumed the session.")
+        for a in self.agents.values():
+            if a.state != "exited":
+                continue
+            steps = self.db.execute(
+                "SELECT * FROM steps WHERE agent_id = ? AND status = 'open'", (a.id,)
+            ).fetchall()
+            for step in steps:
+                self.db.execute("DELETE FROM steps WHERE id = ?", (step["id"],))
+                lane = self.lane(step["stage"], step["track"])
+                label = turn_label(step["stage"], step["round"], lane)
+                self.event("note", PROMPTS["retried"].format(label=label), a)
+        self.set_session_state("running")
+        self.refresh_session_state()
+
     async def fit(self, only: str = "") -> None:
         cols, rows = self.term_size()
         for a in self.live_agents():
@@ -4128,43 +4506,45 @@ class Session:
                 )
 
     async def stop_agents(self) -> None:
+        """Stop every agent. The engine calls it, inside a tick, so no tick types into
+        a dying agent or starts one, and no exit is news."""
         # The rmtree below would lose the posts and the changed results; keep them.
         self.read_posts()
         self.refresh_results()
-        self.stopping = True  # the engine stands still, and exits are not news
-        try:
-            out = await self.tmux.run(
-                "list-panes", "-a", "-F", "#{pane_pid}\t#{pane_dead}", check=False
-            )
-            pids = [
-                int(p)
-                for p, _, dead in (line.partition("\t") for line in out.splitlines())
-                if p.isdigit() and dead != "1"
-            ]
-            for pid in pids:
-                signal_group(pid, signal.SIGTERM)
-            for _ in range(30):
-                if not any(signal_group(p, 0) for p in pids):
-                    break
-                await asyncio.sleep(0.1)
-            for pid in pids:
-                signal_group(pid, signal.SIGKILL)
-            await self.tmux.run("kill-server", check=False)
-            self.tmux.socket.unlink(missing_ok=True)
-            for a in self.live_agents():
-                self.save_agent(a, state="exited", reason="")
-            shutil.rmtree(
-                self.scratch, ignore_errors=True
-            )  # the session file has it all
-            for path in private_files(self.slug):
-                path.unlink(missing_ok=True)
-        finally:
-            self.stopping = False
+        await self.end_panes("-a")
+        await self.tmux.run("kill-server", check=False)
+        self.tmux.socket.unlink(missing_ok=True)
+        for a in self.live_agents():
+            self.save_agent(a, state="exited", reason="")
+        # The session file has it all.
+        shutil.rmtree(self.scratch, ignore_errors=True)
+        for path in private_files(self.slug):
+            path.unlink(missing_ok=True)
 
-    async def end(self) -> None:
-        await self.stop_agents()
-        self.set_session_state("ended")
-        self.event("note", "Ended the session and stopped its agents.")
+    async def end_panes(self, *where: str) -> None:
+        """End the programs in the panes that list-panes finds with where: TERM, and
+        KILL for those still there 3 seconds later (gemini ignores the hangup that
+        kill-session sends)."""
+        out = await self.tmux.run(
+            "list-panes", *where, "-F", "#{pane_pid}\t#{pane_dead}", check=False
+        )
+        pids = [
+            int(p)
+            for p, _, dead in (line.partition("\t") for line in out.splitlines())
+            if p.isdigit() and dead != "1"
+        ]
+        for pid in pids:
+            signal_group(pid, signal.SIGTERM)
+        for _ in range(30):
+            if not any(signal_group(p, 0) for p in pids):
+                break
+            await asyncio.sleep(0.1)
+        for pid in pids:
+            signal_group(pid, signal.SIGKILL)
+
+    def end(self) -> None:
+        """End the session: the engine stops its agents on its next tick."""
+        self.ending = True
 
     def close(self) -> None:
         if self.closed:
@@ -4195,10 +4575,16 @@ def session_label(s: Session) -> Content:
     return Content(f"{SESSION_BADGES.get(s.state, '?')} {s.slug}")
 
 
+def agent_title(a: AgentRun) -> str:
+    """An agent's name, with its generation once it has started again: the same role
+    instance, but not the same agent."""
+    return a.name + (f" ({a.generation})" if a.generation > 1 else "")
+
+
 def tab_label(a: AgentRun) -> Content:
     # An agent that waits for an answer in the room is idle, but not done.
     badge = "?" if a.reason == ROOM_WAIT else AGENT_BADGES.get(a.state, "?")
-    return Content.assemble((f"{badge} {a.name}", agent_color(a)))
+    return Content.assemble((f"{badge} {agent_title(a)}", agent_color(a)))
 
 
 class Mirror(Static):
@@ -4246,7 +4632,7 @@ class AgentView(Vertical):
         ]
         line = " · ".join(p for p in parts if p) + (f": {a.reason}" if a.reason else "")
         self.query_one(".info", Static).update(
-            Content.assemble((a.name, f"bold {agent_color(a)}"), " · ", line)
+            Content.assemble((agent_title(a), f"bold {agent_color(a)}"), " · ", line)
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -4349,7 +4735,13 @@ class SessionView(Vertical):
     def __init__(self, session: Session, **kwargs):
         super().__init__(**kwargs)
         self.session = session
-        self.last_event = 0
+        # Only the newest entries, which are all the room keeps.
+        row = session.db.execute(
+            "SELECT id FROM events WHERE kind != 'hook' ORDER BY id DESC"
+            " LIMIT 1 OFFSET ?",
+            (ROOM_ENTRIES,),
+        ).fetchone()
+        self.last_event = row["id"] if row else 0
         # Fits every agent's name, so the room's columns line up.
         self.name_width = max(
             [12]
@@ -4357,6 +4749,7 @@ class SessionView(Vertical):
         )
         self.tabs: set[str] = set()
         self.needs: dict[str, ActionEntry] = {}  # agent -> its live "needs you" entry
+        self.stop: ActionEntry | None = None  # the live entry of the session's stop
 
     def compose(self) -> ComposeResult:
         with TabbedContent():
@@ -4430,6 +4823,15 @@ class SessionView(Vertical):
             if live:
                 self.needs[a.name] = entry
             return entry
+        if kind == "error" and data.get("resume"):
+            if self.stop is not None:
+                self.stop.resolve()
+            live = s.state == "stopped" and s.driving
+            entry = ActionEntry(
+                Content.assemble(*head, (text, "red")), [("Resume", s.resume)], live
+            )
+            self.stop = entry if live else None
+            return entry
         styles = {"error": "red", "done": "bold green"}
         first, _, rest = text.partition("\n")
         return long_entry(Content.assemble(*head, (first, styles.get(kind, ""))), rest)
@@ -4447,9 +4849,8 @@ class SessionView(Vertical):
             if a.name in self.tabs:
                 tab = tabs.get_tab(f"agent-{a.name}")
                 label = tab_label(a)
-                if (
-                    tab.label.plain != label.plain
-                ):  # relabel only on change: it animates
+                # Relabel only on change: it animates.
+                if tab.label.plain != label.plain:
                     tab.label = label
                 tab.set_class(a.state == "needs_you", "-needs")
         rows = s.db.execute(
@@ -4467,6 +4868,9 @@ class SessionView(Vertical):
             if s.agents[name].state != "needs_you":
                 entry.resolve()
                 del self.needs[name]
+        if self.stop is not None and (s.state != "stopped" or not s.driving):
+            self.stop.resolve()
+            self.stop = None
         for view in self.query(AgentView):
             view.sync()
 
@@ -4538,7 +4942,7 @@ class NewSessionScreen(ModalScreen):
             yield Static(Text("New session", style="bold"))
             yield Select(
                 [(name, name) for name in MODES],
-                value="implement",
+                value="bakeoff",
                 allow_blank=False,
                 id="mode",
             )
@@ -4660,9 +5064,8 @@ class PantheonApp(App):
         self.yolo = setting(cfg, "yolo") if yolo_flag is None else yolo_flag
         self.sessions: dict[str, Session] = {}
         self.current = ""
-        self.transporting: tuple[Session, str, bool, bool] | None = (
-            None  # session, agent, came to answer
-        )
+        # The session, the agent, whether you came to answer it, and whether it ran.
+        self.transporting: tuple[Session, str, bool, bool] | None = None
         self.detach_at = 0.0
         self.seen_needs: dict[str, int] = {}
         self.capturing = False
@@ -4913,10 +5316,8 @@ class PantheonApp(App):
                         *s.tmux.base, "attach-session", "-t", f"={name}", env=s.tmux.env
                     )
                     await proc.wait()
-                except (
-                    BaseException
-                ) as e:  # Textual never comes back if one crosses suspend()
-                    error = e
+                except BaseException as e:
+                    error = e  # Textual never comes back if one crosses suspend()
         except SuspendNotSupported:
             self.notify("This terminal cannot hand over to an agent.", severity="error")
         finally:
@@ -4967,6 +5368,9 @@ class PantheonApp(App):
         except PrepError as e:
             self.notify(str(e), severity="error")
             return
+        except Exception as e:  # bad JSON from gh, a full disk: say so, not nothing
+            self.notify(f"{type(e).__name__}: {e}", severity="error")
+            return
         await self.open_session(slug)
 
     def action_end_session(self) -> None:
@@ -4974,11 +5378,12 @@ class PantheonApp(App):
         if s is None or s.state == "ended":
             self.notify("No open session to end.")
             return
+        if not s.driving:  # its engine, which would stop the agents, does not run here
+            where = "is read-only here" if s.foreign else "is open in another pantheon"
+            self.notify(f"{s.slug} {where}.")
+            return
         question = f"End {s.slug} and stop its agents? You can still read its room."
-        self.push_screen(
-            ConfirmScreen(question),
-            lambda yes: yes and self.run_worker(s.end(), exit_on_error=False),
-        )
+        self.push_screen(ConfirmScreen(question), lambda yes: yes and s.end())
 
     def on_unmount(self) -> None:
         for s in self.sessions.values():
@@ -5034,9 +5439,8 @@ def fetch_upstream() -> str:
     )
     with urllib.request.urlopen(req, timeout=5) as r:
         data = r.read(8_000_000)
-        if getattr(
-            r, "length", None
-        ):  # read(n) does not raise when the body stops short
+        # read(n) does not raise when the body stops short.
+        if getattr(r, "length", None):
             raise ValueError("the download was cut off")
     text = data.decode("utf-8")
     if not text.startswith("#!/usr/bin/env -S uv run --script"):
@@ -5176,9 +5580,10 @@ def cmd_sessions(prune: int | None) -> None:
     if prune is not None:
         for r in rows:
             # A finished session goes after prune days; any session, once stale. An
-            # active one (you gave its team more work after its plan) is not finished.
+            # active one (you gave its team more work after its plan) is not finished,
+            # nor is a stopped one, which Resume goes on with.
             idle = idle_days(r["last"])
-            finished = r["state"] in ("done", "stopped", "ended")
+            finished = r["state"] in ("done", "ended")
             if r["holder"] or not (idle > STALE_DAYS or (finished and idle > prune)):
                 continue
             # Hold its lock until the file is gone, so a pantheon that opens it
@@ -5189,20 +5594,14 @@ def cmd_sessions(prune: int | None) -> None:
                 continue
             try:
                 take_lock(held, r["slug"])
-            except Locked:
+            except (Locked, sqlite3.Error):
                 held.close()
-                continue  # opened since the list
-            except sqlite3.Error as e:
-                # A file with no lock table: no pantheon can open it. Any other error
-                # (a busy file, say) leaves the session for the next prune.
-                if "no such table" not in str(e):
-                    held.close()
-                    continue
+                continue  # opened since the list, or busy: the next prune tries again
             stop_server_sync(r["slug"])
             shutil.rmtree(scratch_dir(r["slug"]), ignore_errors=True)
             for path in private_files(r["slug"]):
                 path.unlink(missing_ok=True)
-            for suffix in ("", "-journal", "-wal", "-shm"):
+            for suffix in ("", "-journal"):
                 Path(f"{db_path(r['slug'])}{suffix}").unlink(missing_ok=True)
             held.close()
             print(f"deleted {r['slug']}")
@@ -5369,7 +5768,8 @@ def cmd_say(target: str, sender: str, words: list[str]) -> int:
     text = (sys.stdin.read() if words == ["-"] else " ".join(words)).strip()
     if not text:
         die("say needs a message")
-    sender = sender or os.environ.get("PANTHEON_AGENT") or "you"
+    # Not you: only pantheon's window posts as you (see read_posts).
+    sender = sender or os.environ.get("PANTHEON_AGENT") or "someone"
     post = {"from": sender, "text": text, "at": now_iso()}
     folder = run_dir_of(path) / "posts"
     try:
@@ -5390,9 +5790,9 @@ def mode_description(mode: Mode) -> str:
     width = max(map(len, mode.agents))
     lines = [mode.help, "", "agents:"]
     for name, agent in mode.agents.items():
-        lines.append(
-            f"  {name:<{width}}  {'one on each track' if agent.multi else 'one'}"
-        )
+        each = "one for each tool" if agent.multi else "one"
+        fresh = ", started again, fresh, for each of its turns" if agent.fresh else ""
+        lines.append(f"  {name:<{width}}  {each}{fresh}")
     lines += ["", "the plan, as the agents read it:"]
     for para in plan_text(mode).split("\n"):
         indent = "     " if para[:1].isdigit() else "  "  # under a stage's text
@@ -5406,32 +5806,39 @@ def mode_description(mode: Mode) -> str:
     )
     about = (
         f"{level} -a N takes the first N tools in the agents setting that can run here "
-        f"(default: {count_help(mode)}). Each multi agent takes them in that order, one "
-        "per track, and each single agent the first, unless the scramble setting gives "
-        "each agent a random order. SPEC is TOOL[:MODEL][@EFFORT], where TOOL is "
-        "claude, codex, gemini, or ollama. pantheon agents MODE shows what it would "
-        "pick here."
+        f"(default: {count_help(mode)}). Each multi agent has an instance for each of "
+        "them, in that order, and each single agent takes the first, unless the "
+        "scramble setting gives each agent a random order. SPEC is "
+        "TOOL[:MODEL][@EFFORT], where TOOL is claude, codex, gemini, or ollama. "
+        "pantheon agents MODE shows what it would pick here."
     )
     return "\n".join(lines) + "\n\n" + textwrap.fill(about, 80)
 
 
 def mode_problems() -> list[str]:
     """Mistakes in MODES that would break pantheon in ways hard to trace: names go in
-    tmux targets and file names, a stage's agents must be the mode's, and a loop's
-    statuses leave no room for go_if's."""
+    tmux targets and file names, a stage's agents must be the mode's, a loop's
+    statuses leave no room for go_if's, and a pick is one turn's."""
     out = []
     for name, mode in MODES.items():
         for part in [*mode.agents, *mode.stages]:
             if not MODE_NAME_RE.fullmatch(part):
                 out.append(f"{name}: {part!r} needs lowercase letters and '-'")
         for stage, st in mode.stages.items():
+            missing = [role for role in st.agents if role not in mode.agents]
             out += [
-                f"{name}.{stage}: the mode has no agent {role!r}"
-                for role in st.agents
-                if role not in mode.agents
+                f"{name}.{stage}: the mode has no agent {role!r}" for role in missing
             ]
             if st.loop and st.go_if:
                 out.append(f"{name}.{stage}: a stage with a loop can't have go_if")
+            multi = any(
+                mode.agents[role].multi for role in st.agents if role not in missing
+            )
+            if st.pick and (st.loop or st.go_if or len(st.agents) != 1 or multi):
+                out.append(
+                    f"{name}.{stage}: a stage that picks a track has one single agent, "
+                    "and no loop or go_if"
+                )
     return out
 
 
@@ -5556,7 +5963,9 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict]:
         "say",
         help="post to a session's room; agents use it",
         description="Post to a session's room. Pantheon gives the post to every agent "
-        "but its author, and each decides whether it needs to act.",
+        "but its author, and each decides whether it needs to act. A post from here "
+        "is someone's, unless it names one of the session's agents: only pantheon's "
+        "window (ctrl+s) posts as you.",
     )
     subs["say"].add_argument(
         "session",
@@ -5568,7 +5977,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict]:
         dest="sender",
         default="",
         metavar="NAME",
-        help="who posts (default: $PANTHEON_AGENT, else you)",
+        help="the agent that posts (default: $PANTHEON_AGENT, else someone)",
     )
     subs["say"].add_argument(
         "message",
@@ -5673,6 +6082,11 @@ def main(argv: list[str] | None = None) -> int:
         or getattr(args, "prune", None) is not None
     ):
         tmux_path()  # these run agents: fail now, before a session starts
+    if command in (None, "start", "session"):
+        try:  # here, so a bad key file stops pantheon with its message, not a traceback
+            install_key()
+        except (OSError, ValueError) as e:
+            die(str(e))
     if command == "config":
         return cmd_config(args)
     if command == "show":
