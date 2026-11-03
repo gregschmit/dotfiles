@@ -22,3 +22,4 @@ git fetch upstream
 ```
 
 - Run `./install` to install dotfiles; note that this will clobber existing files/directories.
+  See [CONTENTS.md](CONTENTS.md) for what it replaces and what each file is.
