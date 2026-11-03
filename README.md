@@ -21,5 +21,10 @@ git remote add upstream https://github.com/gregschmit/dotfiles
 git fetch upstream
 ```
 
-- Run `./install` to install dotfiles; note that this will clobber existing files/directories.
-  See [CONTENTS.md](CONTENTS.md) for what it replaces and what each file is.
+- Run `./install` to install dotfiles.
+
+> [!WARNING]
+> `./install` deletes (`rm -rf`) each existing file or directory it replaces, including
+> `~/.claude`, `~/.codex`, `~/.gemini`, and `~/.agents` with everything in them. Back up anything
+> you want to keep first. See [CONTENTS.md](CONTENTS.md) for the full list and for how to take
+> pieces one at a time.

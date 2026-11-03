@@ -10,17 +10,18 @@ running `./install`.
 of `src/.config/` and `src/.local/bin/` are symlinked one entry at a time, so other files in
 `~/.config` and `~/.local/bin` stay.
 
-This means `install` replaces these directories as a whole, with everything in them:
-
-- `~/.claude`: Claude Code settings, skills, plugins, memory, and session history.
-- `~/.codex`: Codex auth, config, and sessions.
-- `~/.gemini`: Gemini CLI auth, settings, and chats.
-- `~/.agents`: any skills installed there.
-
-It also replaces `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, `~/.zlogin`, `~/.bashrc`,
-`~/.bash_profile`, `~/.profile`, `~/.tcshrc`, `~/.inputrc`, `~/.tmux.conf`, and `~/.vimrc`, and
-it puts `Brewfile`, `chess`, and `ubuntu_pkgs.txt` in your home directory. Back up anything you want
-to keep first, or take pieces one at a time (see the end of this file).
+> [!WARNING]
+> `install` deletes these directories, with everything in them, and replaces them with symlinks:
+>
+> - `~/.claude`: Claude Code settings, skills, plugins, memory, and session history.
+> - `~/.codex`: Codex auth, config, and sessions.
+> - `~/.gemini`: Gemini CLI auth, settings, and chats.
+> - `~/.agents`: any skills installed there.
+>
+> It also replaces `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, `~/.zlogin`, `~/.bashrc`,
+> `~/.bash_profile`, `~/.profile`, `~/.tcshrc`, `~/.inputrc`, `~/.tmux.conf`, and `~/.vimrc`, and
+> it puts `Brewfile`, `chess`, and `ubuntu_pkgs.txt` in your home directory. Back up anything you
+> want to keep first, or take pieces one at a time (see the end of this file).
 
 After an install, the agent tools keep their runtime state inside this repo's `src/.claude`,
 `src/.codex`, and `src/.gemini`. Each has a `.gitignore` that ignores everything except the tracked
