@@ -11,7 +11,7 @@
 
 # Formatted with ruff's default settings: uvx ruff format <this file>
 # The shebang's "# python" is a comment env -S drops; editors read it to pick Python.
-# Tests: pantheon_tests, next to this file.
+# Tests: pantheon test unit runs the unit tests at the end of this file.
 
 """Pantheon: agent collaboration and convergence.
 
@@ -21,50 +21,53 @@ halting prompt true. A stage can also let its agents stop the plan, when they fi
 on, or let one agent pick the track the plan goes on with. A multi agent has an instance for each
 tool: each on a track of its own, or in a stage where they work together, all taking each turn at
 once (which then halts a loop only if all of them halt it); pantheon start help MODE shows a mode's
-agents and plan. A mode can also start an agent again, fresh, for each of its turns, as bakeoff and
-develop do their reviewers, so no review leans on the last one: each start is a new generation of
-that agent, which its tab shows, as in "reviewer-codex (2)", and the room notes. An agent that
-exits starts again the same way at its next turn. Every agent knows the team, the plan, and the
-room, and acts when it sees a reason; once the plan is done, the agents keep running, and you give
-them more work in the room.
+agents and plan, and pantheon test SCENARIO MODE tries it on a toy task. A mode can also start an
+agent again, fresh, for each of its turns, as bakeoff and develop do their reviewers, so no review
+leans on the last one: each start is a new generation of that agent, which its tab shows, as in
+"reviewer-codex (2)", and the room notes. An agent that exits starts again the same way at its next
+turn. Every agent knows the team, the plan, and the room, and acts when it sees a reason; once the
+plan is done, the agents keep running, and you give them more work in the room, unless the session
+stops them then (start --stop-when-done).
 Pantheon shows the team in a chat-room feed (the room), gives each agent a tab with a live copy of
 its screen, and lets you "transport" into an agent's own terminal when it needs you. Ctrl-] or the
 button on tmux's status line brings you back. The top row has a tab for each session you have open
 ({ and } switch them); the row below has its agents' tabs. pantheon help lists the commands.
 
-Agents keep your own setup: agent files, skills, MCP servers, and permission rules. Pantheon adds
-only rules that let them run the room's two commands without asking you. An ollama agent is claude
-with the ollama server as its API; if claude keeps an API key from a Console login, it sends that
-key to the server too, so a server on another machine needs the ollama_remote setting. Pantheon
-types each turn's instructions straight into its agent, and the agent writes its result to a file
-that ends with a "PANTHEON: <status>" line. The room is the team's channel: each agent learns how
-to read it (pantheon room) and post to it (pantheon say), and pantheon gives each post to every
-other agent, which decides whether it needs to act. So an agent can ask the team a question, or wake
-another agent. You can post too (ctrl+s): to answer, or to give a team that is done more work. Only
-those posts reach the agents as the user's. Pantheon's own lines in the room go to no agent. Each
-session has a private tmux server, so agents keep running when pantheon exits. Claude and codex
-report through hooks; gemini reports through its window title. The room names the model each agent
-really runs, and claude's effort, where they differ from what pantheon asked for (gemini's model
-comes from its chat file). Unless it runs from a clone of gregschmit/dotfiles (git updates that),
+Agents keep your own setup: agent files, skills, MCP servers, and permission rules. An ollama
+agent is claude with the ollama server as its API; if claude keeps an API key from a Console login,
+it sends that key to the server too, so a server on another machine needs the ollama_remote
+setting. Pantheon types each turn's instructions straight into its agent. The last message of the
+agent's turn is its report, which ends with a "PANTHEON[status]: <status>" line; when the work is a
+file or a branch, the message says where. The room is the team's channel: an agent reads it in a
+file, and posts to it with a "PANTHEON[say]: <message>" line at the end of its turn's last
+message. Pantheon gives each post to every other agent, which decides
+whether it needs to act. So an agent can ask the team a question, or wake another agent. You can
+post too (ctrl+s): to answer, or to give a team that is done more work. Only those posts reach the
+agents as the user's. Pantheon's own lines in the room go to no agent. Each session has a private
+tmux server, so agents keep running when pantheon exits. Claude and codex report through hooks,
+which also bring each turn's last message; gemini reports through its window title, and pantheon
+reads its last message in the chat file gemini keeps. The room names the model each agent really
+runs, and claude's effort, where they differ from what pantheon asked for (gemini's model comes
+from its chat file). Unless it runs from a clone of gregschmit/dotfiles (git updates that),
 pantheon looks on GitHub for a newer version at most every 12 hours.
 
 Files: ~/.local/state/pantheon (or $PANTHEON_HOME) holds config.toml and one sqlite file per
 session, sessions/<slug>.sqlite3. That file is the whole session: its record, its lock, the prompts,
-and the results. Agents write plain files, so while they run, pantheon keeps their results in
-run/<slug>/, and copies each result into the session file, and each later revision an agent makes to
-it as a revised entry in the room. pantheon say leaves each post in run/<slug>/posts/ for pantheon
-to give out.
+and the reports. Agents read plain files, so while they run, pantheon keeps the room's newest
+entries in run/<slug>/room.txt, and each report in a file beside it.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import functools
 import glob
 import hashlib
 import hmac
 import http.client
+import io
 import ipaddress
 import json
 import os
@@ -84,6 +87,7 @@ import threading
 import time
 import tomllib
 import traceback
+import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -92,6 +96,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NoReturn
+from unittest import mock
 
 from rich.text import Text
 from textual import work
@@ -185,10 +190,10 @@ class Stage:
     agents: dict[str, str]  # the agents that take turns, in order: what each writes
     loop: Loop | None = None
     # For a stage with no loop: the plan goes on past it only if its agents find this
-    # true. Each result then ends with go or stop, and one stop ends the plan.
+    # true. Each report then ends with go or stop, and one stop ends the plan.
     go_if: str = ""
     # For a stage with one single agent and no loop: the track it picks, as this says.
-    # Its result then ends with track-N, and the later stages run on track N alone; or
+    # Its report then ends with track-N, and the later stages run on track N alone; or
     # with stop, which ends the plan.
     pick: str = ""
     # No tracks: the stage runs once, and a multi agent's instances take each of its
@@ -201,11 +206,10 @@ class Mode:
     help: str  # one line, for pantheon start help, and the start of the plan
     agents: dict[str, Agent]
     stages: dict[str, Stage]  # the plan, in order
-    count: int = 1  # tools with no -a: up to this many that can run here
+    count: int = 0  # tools with no -a: up to this many that can run here; 0: all
     effort: str = ""  # an EFFORTS level, or "": each tool's own config
     needs_task: bool = True
     needs_git: bool = True
-    stop_when_done: bool = False
 
 
 MODES: dict[str, Mode] = {
@@ -337,7 +341,6 @@ MODES: dict[str, Mode] = {
                 ),
             ),
         },
-        count=3,
     ),
     "develop": Mode(
         help=(
@@ -379,7 +382,6 @@ MODES: dict[str, Mode] = {
                 together=True,
             ),
         },
-        count=3,
     ),
     "hello": Mode(
         help="the agents say hello, then reply to each other (a quick test)",
@@ -403,7 +405,24 @@ MODES: dict[str, Mode] = {
         effort="low",
         needs_task=False,
         needs_git=False,
-        stop_when_done=True,
+    ),
+}
+
+# pantheon test SCENARIO MODE: a session of the mode on the scenario's task (if the mode
+# takes one), in a new, empty git repo (scenario_repo).
+SCENARIOS = {
+    "fizzbuzz": (
+        "Write fizzbuzz.py, a Python program that prints the numbers from 1 to N, one "
+        "per line, but Fizz for multiples of 3, Buzz for multiples of 5, and FizzBuzz "
+        "for multiples of both. N is its only argument, and 100 if it is not given. "
+        "Add tests that run with python3 -m unittest, and a README that says how to "
+        "run the program and the tests."
+    ),
+    "odd_or_even": (
+        "Write odd_or_even.py, a Python program that takes a whole number as its only "
+        "argument and prints odd or even. For anything else, it prints an error and "
+        "exits with status 1. Add tests that run with python3 -m unittest, and a "
+        "README that says how to run the program and the tests."
     ),
 }
 
@@ -414,8 +433,8 @@ MODES: dict[str, Mode] = {
 # A prompt is header; then, in an agent's first prompt only, who, again (in a later
 # generation), its role, task, team, plan, how, facts, room, and earlier (when the room
 # has posts); then turn, came_in (or came_in_all, in a stage whose agents work
-# together) and work (once there are results); commands (in later prompts, since the
-# agent keeps its context); result or results (with halt or halt_together in a loop,
+# together) and work (once there are reports); room_again (in later prompts, since the
+# agent keeps its context); report or reports (with halt or halt_together in a loop,
 # go, or pick); and step_end.
 PROMPTS = {
     "header": "Pantheon step {step}, for {agent}.",
@@ -425,11 +444,11 @@ PROMPTS = {
         "passes the room's posts to all of them. It makes no decisions: the team does, "
         "and the user has the last word."
     ),
-    # Results under its own name that it does not remember would puzzle it.
+    # Reports under its own name that it does not remember would puzzle it.
     "again": (
         "You are generation {n} of {agent}: you start fresh, and earlier generations "
-        "took your earlier turns, with a context you do not have. Their results and "
-        "posts under your name are in the room and in the results below; read what "
+        "took your earlier turns, with a context you do not have. Their reports and "
+        "posts under your name are in the room and in the reports below; read what "
         "you need."
     ),
     "task": "The task:\n\n{task}",
@@ -464,7 +483,7 @@ PROMPTS = {
         "reason to act outside your turns (a question about your work, a problem in "
         "it, a risk in someone else's), act, and say in the room what you did. Do your "
         "own role's work: ask the owner before you change another agent's work. If you "
-        "change a result after others used it, say so. When you finish something "
+        "change your work after others used it, say so. When you finish something "
         "someone asked for in the room, say so there. If you disagree, say why, once, "
         "with facts; then agree on a way forward, or ask the user. A request from the "
         "user comes first. After your turns, stay ready: the user or the team can ask "
@@ -482,23 +501,24 @@ PROMPTS = {
     ),
     "room": (
         "The room is where the team talks: the user, pantheon, and every agent. It "
-        "also lists each result, with its file, as it comes in. Run the room's two "
-        "commands exactly as written here, with nothing before them and no pipes or "
-        "redirects, so they run without asking anyone. To read the room (this only "
-        "reads; add --last N to see the last N entries), run:\n\n    {room}\n\nTo post "
-        "to it, run:\n\n    {say} 'your message'\n\nPut the message in single quotes, "
-        "so the shell changes nothing in it, and write each ' in it as '\\''. Pantheon "
-        "gives each post to every other agent and to the user. When a post is for one "
-        "agent, start it with that agent's name. Post a question, a problem, or news "
-        "that changes someone else's work; do not post progress. If you need an answer "
-        "before you can finish a turn, post your question and end your turn: the "
-        "answer wakes you."
+        "also lists each agent's report, as it comes in. Pantheon keeps its newest "
+        "entries in this file, which you can read at any time:\n\n    {room}\n\nTo "
+        "post to the room, end the last message of your turn with a line that starts "
+        "with PANTHEON[say]:, like this:\n\nPANTHEON[say]: your message\n\nEverything "
+        "after PANTHEON[say]: is the post, so it can have more than one line. Pantheon "
+        "reads only the last message of a turn, and posts it when the turn ends. It "
+        "gives each post to every other agent and to the user, and each agent takes a "
+        "turn to read it. So post only what another agent must act on now: a "
+        "question, a problem, or news that changes someone else's work. Do not post "
+        "your progress, nor the report that ends a step: pantheon passes that on to "
+        "the agents that need it. When a post is for one agent, start it with that "
+        "agent's name. If you need an answer before you can finish a turn, post your "
+        "question and end your turn: the answer wakes you."
     ),
-    # Every later prompt repeats the commands, since compaction can drop the first.
-    "commands": (
-        "The room's commands, as before (run them exactly as written, with the "
-        "message in single quotes and each ' in it written as '\\''):\n\n"
-        "    {room}\n    {say} 'your message'"
+    # Every later prompt repeats this, since compaction can drop the first.
+    "room_again": (
+        "The room, as before: read it in {room}, and post to it with a line that "
+        "starts with PANTHEON[say]: at the end of the last message of your turn."
     ),
     # An agent gets only the posts made after it starts, so its first prompt lists the
     # newest of the earlier ones (EARLIER_POSTS), and says how many it left out.
@@ -508,21 +528,25 @@ PROMPTS = {
     "turn": "Your turn: {label}. {goal}",
     "round": " round {round}",  # in a turn's label, as in "build round 2, track 1"
     "track": ", track {track}",
-    "came_in": "It is your turn since {agent} wrote {path}.",
-    # In a stage whose agents work together, the turn before can be several results.
+    "came_in": "It is your turn since {agent}'s report came in: {path}",
+    # In a stage whose agents work together, the turn before can be several reports.
     "came_in_all": "It is your turn since all of these came in:\n\n{lines}",
     "came_in_line": "- {agent}: {path} ({status})",
-    "work": "Results so far that you may need, track by track, oldest first:\n\n{lines}",
+    "work": "Reports so far that you may need, track by track, oldest first:\n\n{lines}",
     "work_line": "- {label}, by {agent}: {path} ({status})",
     "work_note": "- {note}",  # how a loop ended: halted or out_of_rounds
-    # The path goes on a line of its own: a long {write} would run into it.
-    "result": (
-        "When you finish, write {write}. Put it in this file:\n\n    {path}\n\nEnd "
-        "the file with this line:\n\n{lines}"
+    # Pantheon keeps each report in a file (report_path) for the next turns.
+    "report": (
+        "When you finish, write {write} as your report: the last message of your "
+        "turn. Pantheon puts it in the room and passes it on to the agents that need "
+        "it, so it needs no post and no file; if your work is a file or a branch, say "
+        "where it is. End the report with this line:\n\n{lines}"
     ),
-    "results": (
-        "When you finish, write {write}. Put it in this file:\n\n    {path}\n\nEnd "
-        "the file with one of these lines:\n\n{lines}"
+    "reports": (
+        "When you finish, write {write} as your report: the last message of your "
+        "turn. Pantheon puts it in the room and passes it on to the agents that need "
+        "it, so it needs no post and no file; if your work is a file or a branch, say "
+        "where it is. End the report with one of these lines:\n\n{lines}"
     ),
     "halt": (
         "Write halt if this is now true: {until}. Else write continue. This is round "
@@ -545,18 +569,18 @@ PROMPTS = {
     ),
     "step_end": "(End of step {step}.)",
     "remind": (
-        "You ended your turn before you finished step {step}.\n\n{commands}\n\n"
-        "{result}\n\n(End of reminder #{id}.)"
+        "You ended your turn before you finished step {step}.\n\n{room}\n\n"
+        "{report}\n\n(End of reminder #{id}.)"
     ),
     "post": (
         "Room post #{id} from {sender}. Pantheon gives every post to every agent. "
         "Decide whether it needs something from you: a request, a question about your "
         "work, or a problem in it. If it does, act, and answer in the room. If not, "
-        "end your turn without doing anything.\n\n{commands}\n\nThe post:\n\n{text}"
+        "end your turn without doing anything.\n\n{room}\n\nThe post:\n\n{text}"
         "\n\n(End of post #{id}.)"
     ),
     "user": "the user",  # you, as the agents read your posts
-    # What pantheon room prints first when its newest entries fill it.
+    # What the room file starts with when its newest entries fill it.
     "room_cut": "({n} older entr{y} left out, to keep this short)",
     # Pantheon's own lines in the room, which go to no agent; halted and out_of_rounds
     # go in the work list of a turn with no track too.
@@ -564,14 +588,18 @@ PROMPTS = {
     "out_of_rounds": "{label}: it ran out of rounds ({n}), and no one halted it.",
     "given_back": "{label} never reached it, so it gets that turn again, fresh.",
     "retried": "{label} did not finish, so it gets that turn again, fresh.",
-    "done": "The plan is done. Its last result{s}: {results}.",
-    "done_result": "{name}, by {agent}",
-    "stopped": "The plan stopped after {stage}. Read why in {results}.",
+    "done": "The plan is done. Read its last report{s}, by {agents}.",
+    "stopped": "The plan stopped after {stage}. Read why in the report{s} by {agents}.",
     "still_running": (
         " The agents still run: post in the room (ctrl+s) to give them more work."
     ),
     "never_started": " No turn came for {names}, so they never started.",
-    "revised": "{name} (revised)",
+    # The first time pantheon answers a gemini dialog in yolo (GEMINI_HELD).
+    "held": (
+        "asks even in yolo before some commands and changes, such as a command with "
+        "a flag or path that also shows in tool output. Pantheon answers each such "
+        "dialog with Allow once."
+    ),
 }
 
 # ---------------------------------------------------------------------- tools and efforts
@@ -685,23 +713,20 @@ CLAUDE_MANAGED = (
 
 # ------------------------------------------------------------------------------- the room
 
-# Under claude's 30,000: past that, claude shows the agent only the output's start.
+# The room file that agents read, in run/<slug>/: the newest entries that fit in
+# ROOM_CHARS, so an agent can read it whole.
+ROOM_FILE = "room.txt"
 ROOM_CHARS = 20_000
 
-# The newest entries the room keeps on screen, and that pantheon room prints with no
-# --last.
+# The newest entries the room keeps on screen, and the most the room file looks at.
 ROOM_ENTRIES = 500
-ROOM_LAST = 50
 
-# An idle agent's reason when it asked the room and ended its turn with no result: a
+# An idle agent's reason when it asked the room and ended its turn with no status: a
 # post wakes it. Not "needs you", since another agent may answer.
 ROOM_WAIT = "waiting for the room"
 
 # The most posts from before an agent joined that its first prompt lists: the newest.
 EARLIER_POSTS = 20
-
-# The most bytes pantheon reads of a post or a result file that an agent wrote.
-READ_LIMIT = 1_000_000
 
 # --------------------------------------------------------------------------------- timing
 
@@ -709,6 +734,7 @@ STARTUP_TIMEOUT = 20  # seconds with no first signal: a startup dialog is likely
 QUIET_TIMEOUT = 60  # seconds without output while working (codex and gemini)
 PASTE_TIMEOUT = 3  # seconds for a paste to show in the input box; else a dialog took it
 SUBMIT_TIMEOUT = 10  # seconds after Enter for the agent's turn to start
+DIALOG_WAIT = 2  # seconds a gemini ✋ title gives its dialog to show, in yolo
 LOCK_STALE = 30  # seconds without a heartbeat before a session lock counts as free
 STALE_DAYS = 7  # days with no room entry before pantheon sessions --prune deletes one
 
@@ -772,6 +798,26 @@ CODEX_HOOK_LABELS = {
     "Stop": "stop",
 }
 GEMINI_WORKING = ("✦", "⏲")
+GEMINI_ASKS = "action required"  # why a gemini agent with a ✋ title needs you
+
+# Gemini asks even in yolo before a shell command with a flag, path, or URL that also
+# shows in tool output, before a build or test command once it changed a build file,
+# and before it changes a build file. In a yolo session, while gemini's input box last
+# showed it in yolo, pantheon answers each of these once (held_dialog). It knows one by
+# a word in its warning's heading: "Untrusted Command Flags Detected", "CAUTION: Build
+# Configuration Was Recently Modified", "Build File Modification". Two warnings show
+# side by side, so their lines mix, but a word stays whole. A dialog that an ask rule
+# of your own opens for such a command looks the same, so pantheon answers it too.
+GEMINI_HELD = ("Untrusted", "CAUTION:", "Modification")
+# Then its question and options, as on a screen with TYPED_NOISE_RE's spaces and box
+# edges taken out; ● marks the chosen option. The key 1 picks Allow once at once.
+GEMINI_HELD_RE = re.compile(
+    r"(?:Allowexecutionof\[Shell\]\?|Applythischange\?)●?1\.Allowonce●?2\."
+    r"(?:Modifywithexternaleditor●?3\.)?No,suggestchanges\(esc\)"
+)
+# Below those options, these mean the live dialog is another one, or none: another
+# list, an ask_user question, or the input box, which gemini hides under a dialog.
+GEMINI_NOT_LIVE = ("●", "Answer Questions", "Type your")
 
 TMUX_LIMIT = 16364  # bytes in one tmux command: new-session and all its arguments
 
@@ -811,6 +857,7 @@ CLAUDE_PROVIDERS = (
 MODE_NAME_RE = re.compile(r"[a-z](?:[a-z-]*[a-z])?")  # a mode's agents and stages
 ANSI_RE = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]")
 TYPED_NOISE_RE = re.compile(r"[\s│┃┆┊╎╏|]+")  # wrapping and box edges in an input box
+BOX_RE = re.compile(r"[\u2500-\u257f]")  # box drawing, whose size follows the pane's
 # ESC above all: an ESC[201~ in a paste ends it early. And lone surrogates, which UTF-8
 # cannot hold.
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\ud800-\udfff]")
@@ -820,11 +867,17 @@ CLAUDE_IMAGE_RE = re.compile(
     r"""(['"]?)([^\s`'"]+\.(?:png|jpe?g|gif|webp))\1(?=[ \t]*$|[ \t]+/)""",
     re.IGNORECASE | re.MULTILINE,
 )
-STATUS_RE = re.compile(r"PANTHEON:\s*([A-Za-z][A-Za-z0-9-]*)", re.I)
+# Lines in the last message of an agent's turn: its status, with its word; and any
+# PANTHEON line, which with [say] starts a post to the room. Models may set them in bold.
+STATUS_RE = re.compile(
+    r"PANTHEON\s*\[\s*status\s*\]\s*:[\s*_`]*([A-Za-z][A-Za-z0-9-]*)", re.I
+)
+MARKER_RE = re.compile(r"[\s>*_`-]*PANTHEON\s*\[\s*([A-Za-z]+)\s*\]\s*:[*_]*\s*", re.I)
+FENCE_RE = re.compile(r"\s*(```|~~~)")  # a code block's first or last line
 
 # --------------------------------------------------------------------------------- schema
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE session (
@@ -838,6 +891,7 @@ CREATE TABLE session (
     pre_existing TEXT NOT NULL DEFAULT '',  -- files with changes before the session, one per line
     yolo INTEGER NOT NULL DEFAULT 0,
     scramble INTEGER NOT NULL DEFAULT 0,    -- the scramble setting when the session started
+    stop_when_done INTEGER NOT NULL DEFAULT 0,  -- stop the agents once the plan is done
     state TEXT NOT NULL DEFAULT 'running',  -- running, needs_you, done, active, stopped, ended
     origin TEXT NOT NULL DEFAULT '',        -- this install's signature; files from elsewhere open read-only
     created_at TEXT NOT NULL DEFAULT ''
@@ -885,11 +939,11 @@ CREATE TABLE steps (                        -- one per turn
     stage TEXT NOT NULL DEFAULT '',
     round INTEGER NOT NULL DEFAULT 0,       -- 1 to max_rounds in a loop; 0: none
     track INTEGER NOT NULL DEFAULT 0,       -- 1 to N: the track, or the instance in a together stage; 0: none
-    name TEXT NOT NULL DEFAULT '',          -- the result's file name, e.g. 01-architect-claude.md
+    name TEXT NOT NULL DEFAULT '',          -- its report's file name, e.g. 01-architect-claude.md
     prompt TEXT NOT NULL DEFAULT '',        -- what pantheon typed into the agent
-    result TEXT NOT NULL DEFAULT '',        -- what the agent wrote: the turn's artifact
+    report TEXT NOT NULL DEFAULT '',        -- the last message of the turn that ended it
     statuses TEXT NOT NULL DEFAULT '',      -- allowed statuses, space separated
-    status TEXT NOT NULL DEFAULT 'open',    -- open, or the status the result ends with
+    status TEXT NOT NULL DEFAULT 'open',    -- open, or the status its report ends with
     sent INTEGER NOT NULL DEFAULT 0         -- the prompt reached the agent
 ) STRICT;
 
@@ -903,7 +957,7 @@ CREATE TABLE events (                       -- the room, plus hook summaries (ki
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL DEFAULT '',
     agent_id INTEGER REFERENCES agents(id) ON DELETE SET NULL,  -- NULL: pantheon or you
-    kind TEXT NOT NULL DEFAULT '',          -- note, start, prompt, say, ran, result, needs, done, error, hook
+    kind TEXT NOT NULL DEFAULT '',          -- note, start, prompt, say, ran, report, needs, done, error, hook
     text TEXT NOT NULL DEFAULT '',
     data TEXT NOT NULL DEFAULT '{}'
 ) STRICT;
@@ -1001,10 +1055,6 @@ def launch_claude(
     if a.effort or a.tool == "ollama":
         values["CLAUDE_CODE_EFFORT_LEVEL"] = a.effort or "auto"  # auto: not your effort
     settings = claude_settings()
-    # The room's commands run without asking you, with any arguments; your deny and ask
-    # rules still win. In yolo too, where they do no harm.
-    room = [room_command(s.slug), say_command(s.slug, a.name)]
-    settings["permissions"] = {"allow": [f"Bash({c} *)" for c in room]}
     if values:
         settings["env"] = values
     if route:  # "": no apiKeyHelper, whose key claude would send this host as X-Api-Key
@@ -1028,8 +1078,8 @@ def launch_claude(
 
 
 def claude_settings_file(slug: str, agent: str) -> Path:
-    # Outside run/<slug>, which agents can write to: it holds the room's allow rules,
-    # and an ollama agent's token.
+    # Outside run/<slug>, which agents can write to: it holds pantheon's hooks, and an
+    # ollama agent's token.
     return RUN / f"{slug}.{agent}.claude-settings.json"
 
 
@@ -1062,8 +1112,6 @@ def codex_writable_roots() -> list[str]:
 
 
 def launch_codex(s: Session, a: AgentRun) -> tuple[list[str], dict]:
-    # The room's commands need no rule here: in a folder you trust, codex runs them in
-    # its sandbox without asking (only its rules files could change what it asks).
     argv = [tool_path("codex"), "--no-daemon", "-C", s.workdir]
     # --add-dir would quit in a folder you have not trusted yet (codex runs it
     # read-only); these roots wait until you trust it. -c replaces your own list, so
@@ -1082,53 +1130,22 @@ def launch_codex(s: Session, a: AgentRun) -> tuple[list[str], dict]:
 
 def launch_gemini(s: Session, a: AgentRun) -> tuple[list[str], dict]:
     # Gemini 0.64 reads injected settings only from root-owned files, so it gets no hooks;
-    # pantheon follows its window title instead. No --skip-trust: gemini asks you once per
-    # repo before it loads the repo's .gemini settings.
+    # pantheon follows its window title instead, and reads its chat file (gemini_turn).
+    # No --skip-trust: gemini asks you once per repo before it loads the repo's .gemini
+    # settings.
     argv = [tool_path("gemini"), "--session-id", a.native_id]
     argv += ["--include-directories", s.scratch]
     argv += model_args("gemini", a.model, a.effort)
     if s.yolo:
         argv += ["--approval-mode", "yolo"]
-    # The room's commands run without asking you; in yolo too, since gemini turns yolo
-    # off in a folder you have not trusted. A --policy flag replaces your own policy
-    # paths, so they go too. Never --allowed-tools: it denies every other shell command,
-    # even in yolo.
-    policy = gemini_policy(s.slug)
-    write_private(policy, gemini_rules(s.slug))
-    for path in [str(policy), *gemini_policy_paths()]:
-        argv += ["--policy", path]
     return argv, {}
 
 
-def gemini_policy(slug: str) -> Path:
-    # Outside run/<slug>, which agents can write to.
-    return RUN / f"{slug}.gemini-policy.toml"
-
-
-def gemini_rules(slug: str) -> str:
-    """A gemini policy that runs the room's commands without asking. Priority 320 beats
-    the denies gemini adds for a tools.allowed or tools.core list in your settings, but
-    not your tools.exclude, your confirmationRequired, or an admin's policy."""
-    rule = '[[rule]]\ntoolName = "run_shell_command"\ncommandPrefix = {}\n'
-    rule += 'decision = "allow"\npriority = 320\n'
-    # say with any --from, so one file serves each gemini agent in the session
-    say = shlex.join(agent_command(slug, "say"))
-    return "\n".join(rule.format(toml_value(c)) for c in (room_command(slug), say))
-
-
-def gemini_policy_paths() -> list[str]:
-    """The policy paths gemini would read without --policy: policyPaths in your
-    settings, else its own policies dir. Gemini expands a ~ in them itself."""
-    paths = read_jsonc(gemini_home() / "settings.json").get("policyPaths")
-    if not isinstance(paths, list):
-        paths = []
-    paths = [p for p in paths if isinstance(p, str) and p]
-    return paths or [str(gemini_home() / "policies")]
-
-
-def gemini_model(native_id: str) -> str:
-    """The model of gemini's last reply in a session, from the chat file it keeps, or "".
-    With -m auto, gemini picks the model again for each prompt."""
+def gemini_turn(native_id: str) -> tuple[str, str]:
+    """The model of gemini's last reply in a session, and the last message of its last
+    turn, from the chat file gemini keeps; "" for each one it does not find. With -m
+    auto, gemini picks the model again for each prompt. Gemini adds each message to the
+    file as soon as the model finishes it, so before its title shows the turn's end."""
     home, pattern = gemini_home(), f"tmp/*/chats/session-*-{native_id[:8]}.jsonl"
     # gemini in its macOS sandbox cannot write ~/.gemini, so it keeps them in ~/.cache.
     sandboxed = home.parent / ".cache" / ".gemini"
@@ -1141,28 +1158,44 @@ def gemini_model(native_id: str) -> str:
         except (OSError, ValueError, AttributeError):
             continue
     if not files:
-        return ""
+        return "", ""
     try:  # the newest: gemini can start a second file for the same session
         with max(files)[1].open("rb") as fh:
             size = fh.seek(0, os.SEEK_END)
             fh.seek(max(0, size - 1_000_000))  # its last reply is near the end
             lines = fh.read().splitlines()
     except OSError:
-        return ""
+        return "", ""
+    text, turn = "", True
     for line in reversed(lines):
-        if b'"model"' not in line:
-            continue
         try:
             rec = json.loads(line)
         except ValueError:  # the first line, cut by the seek, or one being written
             continue
-        if not isinstance(rec, dict) or rec.get("type") != "gemini":
+        if not isinstance(rec, dict):
             continue
+        # A prompt, or a tool's output: a message before it is an earlier turn's.
+        if rec.get("type") == "user":
+            turn = False
+        if rec.get("type") != "gemini":
+            continue
+        if turn:
+            text, turn = part_text(rec.get("content")), False
         model = rec.get("model")
         # "auto" means its router failed, so the line names no real model.
         if isinstance(model, str) and model and not model.startswith("auto"):
-            return model
-    return ""
+            return model, text
+    return "", text
+
+
+def part_text(content) -> str:
+    """The text of a gemini message: a string, a part, or a list of them."""
+    parts = content if isinstance(content, list) else [content]
+    return "".join(
+        p if isinstance(p, str) else str(p.get("text") or "")
+        for p in parts
+        if isinstance(p, str) or (isinstance(p, dict) and not p.get("thought"))
+    )
 
 
 def launch_ollama(s: Session, a: AgentRun) -> tuple[list[str], dict]:
@@ -1267,20 +1300,6 @@ def read_text(path: str) -> str:
         return ""
 
 
-def read_agent_file(path: str) -> bytes | None:
-    """A file an agent wrote, or None when no regular file is there. It never follows a
-    link, nor waits on a pipe, that an agent put there. It reads one byte past
-    READ_LIMIT, so a caller can tell a file that is too long."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as f:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                return None
-            return f.read(READ_LIMIT + 1)
-    except OSError:
-        return None
-
-
 def private_dir(path: Path) -> None:
     """Make path a directory only you can use; refuse a planted symlink or a foreign owner."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1330,6 +1349,44 @@ def paste_shown(tool: str, before: str, after: str, text: str) -> bool:
         return False  # a long text shows only as a placeholder, never as its end
     tail = TYPED_NOISE_RE.sub("", text)[-60:]
     return bool(tail) and a.count(tail) > b.count(tail)
+
+
+def held_dialog(screen: str) -> str:
+    """The dialog on a gemini screen, if gemini opens it even in yolo (GEMINI_HELD):
+    its text from its first line to its options, which tells one from the next; else
+    "". Only the live dialog counts: its options come last, with nothing below them
+    from GEMINI_NOT_LIVE (unless ui.collapseDrawerDuringApproval is false, which keeps
+    the input box under a dialog), so a dialog that history quotes does not count."""
+    lines = [TYPED_NOISE_RE.sub("", line) for line in screen.splitlines()]
+    flat = "".join(lines)
+    found = list(GEMINI_HELD_RE.finditer(flat))
+    if not found:
+        return ""
+    m = found[-1]
+    after = flat[m.end() :]
+    if any(TYPED_NOISE_RE.sub("", t) in after for t in GEMINI_NOT_LIVE):
+        return ""
+    body = flat.rfind("╯", 0, m.start())  # the end of its command or diff box
+    if body < 0 or not any(w in flat[body : m.start()] for w in GEMINI_HELD):
+        return ""
+    # From its first line, "? Shell  <command>" ("2 of 3" when more wait). It is off the
+    # top of a dialog taller than the pane; the text then starts at the top.
+    start = at = 0
+    for line in lines:
+        if at >= m.start():
+            break
+        if line.startswith("?"):
+            start = at
+        at += len(line)
+    return BOX_RE.sub("", flat[start : m.end()])
+
+
+def gemini_yolo(screen: str) -> bool | None:
+    """Whether gemini's empty input box shows it in yolo, where its prompt is * (> in
+    its other modes), or None with no such box on the screen."""
+    flat = TYPED_NOISE_RE.sub("", screen)
+    at = flat.rfind(TYPED_NOISE_RE.sub("", INPUT_MARKERS["gemini"][0]))
+    return {"*": True, ">": False}.get(flat[at - 1]) if at > 0 else None
 
 
 def last_lines(screen: str, n: int = 8) -> str:
@@ -1439,7 +1496,7 @@ def clean_env() -> dict[str, str]:
         env.pop(k, None)
     for k in [k for k in env if k.startswith("TERM_PROGRAM")]:
         del env[k]
-    if "CLAUDECODE" in env:  # pantheon itself runs inside Claude Code
+    if "CLAUDECODE" in env:  # pantheon itself can run inside Claude Code
         for k in list(env):
             claude = k.startswith(("CLAUDE_CODE_", "CLAUDE_AGENT_SDK"))
             if claude or k in ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT"):
@@ -2183,17 +2240,15 @@ def scratch_dir(slug: str) -> Path:
     return RUN / slug
 
 
-def db_uri(path: Path, mode: str = "rw") -> str:
-    # mode: rw; rwc, which can create the file; or ro, which only reads.
-    return f"file:{urllib.parse.quote(os.path.realpath(path))}?mode={mode}"
+def db_uri(path: Path) -> str:
+    # mode=rw: it never makes a file.
+    return f"file:{urllib.parse.quote(os.path.realpath(path))}?mode=rw"
 
 
-def connect(path: Path, mode: str = "rw") -> sqlite3.Connection:
+def connect(path: Path) -> sqlite3.Connection:
     # isolation_level=None: autocommit, so no read transaction stays open between polls.
     # The default rollback journal keeps a closed session in this one file.
-    db = sqlite3.connect(
-        db_uri(path, mode), uri=True, timeout=10.0, isolation_level=None
-    )
+    db = sqlite3.connect(db_uri(path), uri=True, timeout=10.0, isolation_level=None)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
     return db
@@ -2370,6 +2425,8 @@ def spec_text(tool: str, model: str, effort: str) -> str:
 
 def count_help(mode: Mode) -> str:
     """How many tools a mode takes with no -a, for its help."""
+    if not mode.count:
+        return "all that can run here"
     return str(mode.count) if mode.count == 1 else f"up to {mode.count}"
 
 
@@ -2407,10 +2464,11 @@ def resolve_roster(
     notes: list[str] = []
     text = agents.strip()
     if not text or text.isdecimal():
-        # -a N needs N. With no -a, up to the mode's count will do, down to one.
-        n = int(text) if text else mode.count
-        least = n if text else 1
+        # -a N needs N. With no -a, up to the mode's count will do (with none, all),
+        # down to one. Ollama counts only with a model for the level.
         pool = setting(cfg, "agents")
+        n = int(text) if text else mode.count or len(pool)
+        least = n if text else 1
         specs, skipped = [], []
         for tool in pool:  # the first n that can run here, in order
             if len(specs) == n:
@@ -2636,6 +2694,35 @@ class NewSession:
     agents: str = ""  # -a: how many, or SPEC,SPEC,...
     picks: list[str] = field(default_factory=list)  # --agent ROLE=SPEC
     effort: str | None = None  # --effort: a level, or "" for none; None: the mode's
+    stop_when_done: bool = (
+        False  # a one-shot run: stop the agents once the plan is done
+    )
+
+
+def scenario_repo() -> str:
+    """A new git repo in a temp dir, with no files: where pantheon test runs a scenario.
+    Its one commit is empty, since a session starts from a commit. It stays after
+    pantheon exits, with the agents' work."""
+    repo = tempfile.mkdtemp(prefix="pantheon-test-")
+    # Pantheon's name on the commit, and no signing, which could ask for a passphrase.
+    me = ["-c", "user.name=pantheon", "-c", "user.email=pantheon@localhost"]
+    for args in (
+        ["init", "-q"],
+        [
+            *me,
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Start.",
+        ],
+    ):
+        rc, _, err = git(repo, *args)
+        if rc:
+            raise PrepError(f"cannot make a git repo in {repo}: {err.strip()}")
+    return repo
 
 
 def dirty_files(workdir: str) -> list[str]:
@@ -2705,8 +2792,8 @@ def prepare(
         now = now_iso()
         db.execute(
             "INSERT INTO session (id, slug, mode, task, source, dir, base_commit, pre_existing,"
-            " yolo, scramble, state, origin, created_at)"
-            " VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)",
+            " yolo, scramble, stop_when_done, state, origin, created_at)"
+            " VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)",
             (
                 slug,
                 req.mode,
@@ -2717,6 +2804,7 @@ def prepare(
                 "\n".join(pre_existing),
                 int(req.yolo),
                 int(scramble),
+                int(req.stop_when_done),
                 session_origin(slug, now),
                 now,
             ),
@@ -2740,6 +2828,9 @@ def prepare(
         opening += "".join(f"; {name}: {specs[key]}" for name, key in picks.items())
         level = effort_level(mode, req.effort)
         opening += f" (effort {level})" if level else ""
+        opening += (
+            "; the agents stop once the plan is done" if req.stop_when_done else ""
+        )
         for text in [opening + ".", *notes]:
             db.execute(
                 "INSERT INTO events (at, kind, text) VALUES (?, 'note', ?)", (now, text)
@@ -2869,7 +2960,7 @@ def plan_text(mode: Mode) -> str:
 
 
 def statuses_of(stage: Stage, tracks: int) -> tuple[str, ...]:
-    """The PANTHEON lines a turn in the stage may end with."""
+    """The statuses a turn in the stage may end with."""
     if stage.loop:
         return ("continue", "halt")
     if stage.pick:
@@ -2877,59 +2968,40 @@ def statuses_of(stage: Stage, tracks: int) -> tuple[str, ...]:
     return ("go", "stop") if stage.go_if else ("done",)
 
 
-def result_lines(write: str, path: str, statuses) -> str:
-    """The end of a prompt: where the result goes, and the line it ends with."""
-    lines = "\n".join(f"PANTHEON: {s}" for s in statuses)
-    key = "result" if len(statuses) == 1 else "results"
-    return PROMPTS[key].format(write=write, path=path, lines=lines)
+def report_lines(write: str, statuses) -> str:
+    """The end of a prompt: what the report is, and the line it ends with."""
+    lines = "\n".join(f"PANTHEON[status]: {s}" for s in statuses)
+    key = "report" if len(statuses) == 1 else "reports"
+    return PROMPTS[key].format(write=write, lines=lines)
 
 
-def agent_command(slug: str, command: str) -> list[str]:
-    """A pantheon command as an agent runs it: pantheon's own python (the uv shebang
-    fails in codex's sandbox) on this file, with the session file's path, since codex
-    may drop PANTHEON_HOME from the agent's environment. The prompts, claude's rules,
-    and gemini's policy all use this text."""
-    path = os.path.realpath(db_path(slug))
-    return [sys.executable, "-I", "-B", str(program_path()), command, path]
-
-
-def room_command(slug: str) -> str:
-    """What an agent runs to read the room."""
-    return shlex.join(agent_command(slug, "room"))
-
-
-def say_command(slug: str, agent: str) -> str:
-    """What an agent runs to post to the room, with its name, since codex may drop
-    PANTHEON_AGENT too."""
-    return shlex.join([*agent_command(slug, "say"), "--from", agent])
-
-
-def revisions(db: sqlite3.Connection) -> dict[int, str]:
-    """Each result's newest revision, by step id: its text as an agent changed it after
-    the turn. Revised entries in the room hold them."""
-    out = {}
-    for r in db.execute("SELECT data FROM events WHERE kind = 'result' ORDER BY id"):
-        data = json.loads(r["data"] or "{}")
-        if "text" in data:
-            out[data.get("step")] = data["text"]
-    return out
-
-
-def parse_status(text: str | None, name: str, allowed: list[str]) -> tuple[str, str]:
-    """The status a result ends with, or the problem with it."""
-    if text is None:
-        return "", f"ended its turn without writing {name}"
-    for line in reversed([line for line in text.splitlines() if line.strip()][-3:]):
-        m = STATUS_RE.search(line)
-        if m:
-            status = m.group(1).lower()
-            if status in allowed:
-                return status, ""
-            return (
-                "",
-                f"{name} ends with PANTHEON: {status}, not {' or '.join(allowed)}",
-            )
-    return "", f"{name} has no PANTHEON line at the end"
+def read_reply(text: str) -> tuple[list[str], str, str]:
+    """The posts in the last message of an agent's turn, its status, and the rest of
+    the message, which is the turn's report. A post runs from a PANTHEON[say] line
+    (MARKER_RE) to the next PANTHEON line, or to the end. The status is the word after
+    the last PANTHEON[status], in lower case, or "". A PANTHEON line in a code block is
+    text, so an agent can quote one."""
+    posts, status, rest = [], "", []
+    post = None  # the lines of the post that is open
+    fenced = False
+    for line in text.splitlines():
+        m = None if fenced else MARKER_RE.match(line)
+        if FENCE_RE.match(line):
+            fenced = not fenced
+        if m is None:
+            (rest if post is None else post).append(line)
+            continue
+        if post is not None:
+            posts.append(post)
+        kind = m.group(1).lower()
+        post = [line[m.end() :]] if kind == "say" else None
+        if kind == "status":
+            word = STATUS_RE.search(line)
+            status = word.group(1).lower() if word else ""
+    if post is not None:
+        posts.append(post)
+    texts = [t for t in ("\n".join(p).strip() for p in posts) if t]
+    return texts, status, "\n".join(rest).strip()
 
 
 # -------------------------------------------------------------------------------- runtime
@@ -2986,10 +3058,10 @@ def tmux_conf(slug: str) -> Path:
 
 
 def private_files(slug: str) -> list[Path]:
-    """The files a session keeps beside run/<slug>: its tmux conf, gemini's policy,
-    and each ollama agent's claude settings."""
+    """The files a session keeps beside run/<slug>: its tmux conf, and each ollama
+    agent's claude settings."""
     settings = RUN.glob(glob.escape(slug) + ".*.claude-settings.json")
-    return [tmux_conf(slug), gemini_policy(slug), *settings]
+    return [tmux_conf(slug), *settings]
 
 
 def tmux_name(slug: str) -> str:
@@ -3034,6 +3106,28 @@ def stop_server_sync(slug: str) -> None:
     tmux.socket.unlink(missing_ok=True)
 
 
+def delete_session(slug: str) -> bool:
+    """Delete a session for good: stop its agents, if they still run, and remove its
+    files. False when another pantheon has it open, or it is busy."""
+    # Hold its lock until the file is gone, so a pantheon that opens it meanwhile is
+    # turned away rather than left with no file.
+    try:
+        held = connect(db_path(slug))
+    except sqlite3.Error:
+        return False
+    try:
+        take_lock(held, slug)
+    except (Locked, sqlite3.Error):
+        held.close()
+        return False
+    stop_server_sync(slug)  # and its private files
+    shutil.rmtree(scratch_dir(slug), ignore_errors=True)
+    for suffix in ("", "-journal"):
+        Path(f"{db_path(slug)}{suffix}").unlink(missing_ok=True)
+    held.close()
+    return True
+
+
 @dataclass
 class Outgoing:
     """A text pantheon will type into an agent."""
@@ -3076,10 +3170,18 @@ class AgentRun:
     title: str = ""
     typeable: bool = False  # it needs you, but pantheon may still type to it
     saw_work: bool = False  # gemini showed its working title since its last turn ended
+    asked: float = 0.0  # when its ✋ title showed, in yolo: the dialog gets DIALOG_WAIT
+    allowed: str = ""  # the held dialog pantheon last pressed 1 on (held_dialog's text)
+    # Whether its input box last showed gemini in yolo (gemini_yolo), so pantheon may
+    # answer its held dialogs. None: not seen since it started or you were in.
+    may_answer: bool | None = None
     in_turn: bool = False  # from a prompt to its Stop: tool hooks count only then
     ran: tuple[str, str] = ("", "")  # the model and effort it reports, as last known
     no_effort: bool | None = None  # claude_sends_no_effort, once read
+    # The last message of its turn, which turn_ended takes: its text (read_reply's
+    # rest) and its status.
     last_message: str = ""
+    last_status: str = ""
     # What to type once the agent is idle, oldest first. A reopen rebuilds it from the
     # file, in room order: the unsent step, and the posts after heard.
     outbox: list[Outgoing] = field(default_factory=list)
@@ -3154,7 +3256,16 @@ class Session:
         self.task, self.workdir, self.base = row["task"], row["dir"], row["base_commit"]
         self.pre_existing = [line for line in row["pre_existing"].splitlines() if line]
         self.yolo, self.scramble = bool(row["yolo"]), bool(row["scramble"])
+        self.stop_when_done = bool(row["stop_when_done"])
         self.state = row["state"]
+        conf = tmux_conf(slug)
+        if not self.foreign:
+            private_dir(scratch_dir(slug))
+            write_private(conf, TMUX_CONF)
+        # Before the agents load: restore makes prompts, which name the room file.
+        self.scratch = os.path.realpath(scratch_dir(slug))
+        self.room_file = os.path.join(self.scratch, ROOM_FILE)
+        self.room_changed = True  # so the first tick writes the room file
         self.roster = {
             r["key"]: r for r in self.db.execute("SELECT * FROM roster ORDER BY id")
         }
@@ -3181,12 +3292,6 @@ class Session:
         }
         for a in self.agents.values():
             self.restore(a)
-        conf = tmux_conf(slug)
-        if not self.foreign:
-            private_dir(scratch_dir(slug))
-            private_dir(scratch_dir(slug) / "posts")
-            write_private(conf, TMUX_CONF)
-        self.scratch = os.path.realpath(scratch_dir(slug))
         self.tmux = Tmux(tmux_path(), tmux_name(slug), str(conf), clean_env())
         self.closed = False
         self.driving = not self.foreign  # false too once another pantheon takes over
@@ -3298,6 +3403,7 @@ class Session:
                 json.dumps(data or {}),
             ),
         )
+        self.room_changed = self.room_changed or kind != "hook"
         return cur.lastrowid  # its room id
 
     def save_agent(self, a: AgentRun, **fields) -> None:
@@ -3352,41 +3458,14 @@ class Session:
             sql += " AND sent = 1"
         return self.db.execute(sql + " ORDER BY id DESC", args).fetchone()
 
-    def result_path(self, step) -> str:
+    def report_path(self, step) -> str:
+        """The file in which pantheon keeps a step's report, for the agents to read."""
         return os.path.join(self.scratch, step["name"])
 
     def lane(self, stage: str, track: int) -> int:
         """A step's lane: its track, in a stage on tracks; else 0. In a stage whose
         agents work together, track only tells a multi agent's instances apart."""
         return 0 if self.mode.stages[stage].together else track
-
-    def result_of(self, step) -> tuple[str, str, str | None]:
-        """The step's status, the problem with its result file, and the file's text."""
-        raw = read_agent_file(self.result_path(step))
-        text = None if raw is None else raw[:READ_LIMIT].decode("utf-8", "replace")
-        if raw is not None and len(raw) > READ_LIMIT:
-            return "", f"{step['name']} is over {READ_LIMIT} bytes; write less", text
-        status, problem = parse_status(text, step["name"], step["statuses"].split())
-        return status, problem, text
-
-    def refresh_results(self) -> None:
-        """Keep each result that an agent changed after its turn, as a revised entry in
-        the room, since the run dir goes when the agents stop. steps.result keeps what
-        the turn itself wrote, which the next turns worked from."""
-        newest = revisions(self.db)
-        rows = self.db.execute(
-            "SELECT id, agent_id, name, result, status FROM steps WHERE status != 'open'"
-        ).fetchall()
-        for step in rows:
-            raw = read_agent_file(self.result_path(step))
-            if raw is None or len(raw) > READ_LIMIT:
-                continue
-            text = raw.decode("utf-8", "replace")
-            if not text.strip() or text == newest.get(step["id"], step["result"]):
-                continue
-            data = {"step": step["id"], "status": step["status"], "text": text}
-            name = PROMPTS["revised"].format(name=step["name"])
-            self.event("result", name, self.agent_by_id(step["agent_id"]), data)
 
     def step_label(self) -> tuple[AgentRun | None, str]:
         """The agent and turn under way; with more than one, how many, and their stage
@@ -3455,12 +3534,13 @@ class Session:
             while self.db.execute("SELECT 1 FROM hooks LIMIT 1").fetchone():
                 self.read_hooks()
             await self.check_server()
-        self.read_posts()  # first: an agent posts before its turn ends
         self.read_hooks()
         if now - self.last_poll >= 0.5:
             self.last_poll = now
-            await self.poll_panes()
+            await self.poll_panes(now)
         self.watchdogs(now)
+        if self.room_changed and self.live_agents():  # only agents read it
+            self.write_room()
         await self.send_pending(now)
         await self.advance()
 
@@ -3558,15 +3638,16 @@ class Session:
             ):
                 self.needs_you(a, ev.get("message") or "waiting for you")
         elif name == "Stop":
-            a.last_message = ev.get("last_assistant_message") or ""
+            message = ev.get("last_assistant_message")
+            self.replied(a, message if isinstance(message, str) else "")
             # Claude may leave a background task (a dev server) running for good, so
-            # wait for it only while the turn's step has no result yet. A turn with no
+            # wait for it only while the turn's step has no report yet. A turn with no
             # step has none to wait for.
             step = self.open_step(a, sent_only=True)
             if (
                 ev.get("background_tasks")
                 and step is not None
-                and not self.result_of(step)[0]
+                and a.last_status not in step["statuses"].split()
             ):
                 return
             a.in_turn = False
@@ -3608,8 +3689,26 @@ class Session:
             text = ("now runs" if old_effort else "runs") + f" at effort {new_effort}"
             self.event("ran", text, a, data)
 
+    def replied(self, a: AgentRun, message: str) -> None:
+        """The last message of an agent's turn: its posts go in the room, from the
+        agent itself, since its own tool gave the message; turn_ended takes the rest,
+        and the status."""
+        # A lone surrogate, which JSON can hold, cannot go in the session file.
+        message = message.encode("utf-8", "replace").decode()
+        posts, a.last_status, a.last_message = read_reply(message)
+        for text in posts:
+            self.post(a.name, text)
+
+    def gemini_turn_ended(self, a: AgentRun) -> None:
+        model, message = gemini_turn(a.native_id)
+        self.note_ran(a, model)  # before the step's report
+        self.replied(a, message)
+        self.turn_ended(a)
+
     def on_title(self, a: AgentRun, title: str) -> None:
         glyph = title.strip()[:1]
+        if glyph != "✋":
+            a.asked, a.allowed = 0.0, ""  # the next ✋ is a new dialog
         # Gemini's title changes inside a turn too; only the first change starts it.
         starts = glyph in (*GEMINI_WORKING, "✋") and not a.saw_work
         if glyph in GEMINI_WORKING:
@@ -3621,11 +3720,15 @@ class Session:
             a.saw_work = True
             if starts:
                 self.turn_started(a, "")
-            self.needs_you(a, "action required")
+            # In yolo, gemini_asks looks at the dialog first, with no typing meanwhile,
+            # unless the dialog needs you already (a reopen sees its title anew).
+            if not self.yolo:
+                self.needs_you(a, GEMINI_ASKS)
+            elif a.reason != GEMINI_ASKS:
+                self.set_state(a, "working")
         elif glyph == "◇" and a.saw_work:  # gemini shows ◇ at startup too
             a.saw_work = False
-            self.note_ran(a, gemini_model(a.native_id))  # before the step's result
-            self.turn_ended(a)
+            self.gemini_turn_ended(a)
 
     def turn_started(self, a: AgentRun, prompt: str) -> None:
         """A turn started, so a paste that this turn took is done. A turn that
@@ -3668,21 +3771,24 @@ class Session:
     def turn_ended(self, a: AgentRun) -> None:
         answering = a.answering
         self.save_agent(a, answering=False)
-        self.refresh_results()  # the turn may have fixed an earlier result
+        # Taken once, so no later turn takes this one's report.
+        text, status = a.last_message, a.last_status
+        a.last_message = a.last_status = ""
         step = self.open_step(a, sent_only=True)
         if step is None:  # a turn that a room post, or you by transport, started
             self.set_state(a, "idle")
-            # An answer to a post goes in the room by say; a reply to you, here.
-            if a.last_message and not answering:
-                self.event("note", "replied:\n" + a.last_message.strip(), a)
+            # An answer to a post goes in the room as a post; a reply to you, here.
+            if text and not answering:
+                self.event("note", "replied:\n" + text, a)
             return
-        status, problem, text = self.result_of(step)
-        if problem:
-            self.read_posts()  # a post from this turn may wait in posts/ still
-            # Only an agent with no result may wait for an answer: a result with a
-            # wrong or missing PANTHEON line means it thinks it is done.
-            if text is not None or not a.posted:
-                self.needs_you(a, problem, remind=True)
+        allowed = step["statuses"].split()
+        if status not in allowed:
+            # Only a turn with no status may wait for an answer: a wrong status means
+            # the agent thinks it is done.
+            if status or not a.posted:
+                why = f"PANTHEON[status]: {status}, not " + " or ".join(allowed)
+                why = why if status else "no PANTHEON[status]"
+                self.needs_you(a, "ended its turn with " + why, remind=True)
                 return
             # It asked the room, and the post that answers wakes it. Not "needs you",
             # since another agent may answer, so no Remind.
@@ -3691,12 +3797,14 @@ class Session:
             self.set_state(a, "idle", ROOM_WAIT)
             return
         self.db.execute(
-            "UPDATE steps SET status = ?, result = ? WHERE id = ?",
+            "UPDATE steps SET status = ?, report = ? WHERE id = ?",
             (status, text, step["id"]),
         )
+        # And in a file, for the agents that take the next turns.
+        write_private(Path(self.report_path(step)), text + "\n")
         a.outbox = [o for o in a.outbox if o.kind != "remind"]  # stale reminders
         self.set_state(a, "idle")
-        self.event("result", step["name"], a, {"step": step["id"], "status": status})
+        self.event("report", step["name"], a, {"step": step["id"], "status": status})
         if note := self.loop_end(step["stage"], step["track"]):
             self.event("note", note)
 
@@ -3725,7 +3833,7 @@ class Session:
             )
         return PROMPTS["out_of_rounds"].format(label=label, n=st.loop.max_rounds)
 
-    async def poll_panes(self) -> None:
+    async def poll_panes(self, now: float) -> None:
         if not self.live_agents():
             return
         fmt = "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{window_activity}\t#{pane_title}"
@@ -3757,16 +3865,31 @@ class Session:
             if a.tool == "gemini" and title != a.title:
                 self.on_title(a, title)
             a.title = title
+            if a.tool != "gemini" or not self.yolo:
+                continue
+            # Each poll, since one dialog can follow another with no new title.
+            if title.strip()[:1] == "✋":
+                await self.gemini_asks(a, now)
+            elif a.may_answer is None and self.attached != a.name:
+                screen = await self.tmux.run(
+                    "capture-pane", "-p", "-J", "-t", pane(name), check=False
+                )
+                a.may_answer = gemini_yolo(screen)
 
     def exited(self, a: AgentRun, status: str, tail: str = "") -> None:
+        self.read_hooks()  # a Stop that came just before the exit ends its turn first
         step = self.open_step(a, sent_only=True)
-        if step is not None and self.result_of(step)[0]:
-            if a.tool == "gemini":  # it exited before its ◇ title could end the turn
-                self.note_ran(a, gemini_model(a.native_id))
-            self.turn_ended(a)  # it wrote its result first (gemini has no hooks)
+        if step is not None and a.tool == "gemini":
+            # Its ◇ title, which ends a turn, may not have come before the exit; its
+            # chat file has the turn's last message.
+            model, message = gemini_turn(a.native_id)
+            if read_reply(message)[1] in step["statuses"].split():
+                self.note_ran(a, model)
+                self.replied(a, message)
+                self.turn_ended(a)
         # A turn that never reached it goes back to the plan, which starts the agent
         # again, fresh, for it: while the session goes on, and only when the agent had
-        # a result since it last started (a start that failed would only fail again).
+        # a report since it last started (a start that failed would only fail again).
         going = self.state in ("running", "needs_you")
         started = self.db.execute(
             "SELECT COALESCE(MAX(id), 0) FROM events WHERE agent_id = ? AND kind = 'start'",
@@ -3780,7 +3903,7 @@ class Session:
             going
             and unsent
             and self.db.execute(
-                "SELECT 1 FROM events WHERE agent_id = ? AND kind = 'result' AND id > ?",
+                "SELECT 1 FROM events WHERE agent_id = ? AND kind = 'report' AND id > ?",
                 (a.id, started),
             ).fetchone()
         )
@@ -3833,41 +3956,15 @@ class Session:
 
     # -- the room
 
-    def read_posts(self) -> None:
-        """Post what pantheon say left in posts/, oldest first. Agents write files, not
-        the session file, since codex's sandbox cannot write that."""
-        folder = os.path.join(self.scratch, "posts")
-        try:
-            st = os.lstat(folder)
-            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
-                return  # an agent put something else there
-            names = sorted(n for n in os.listdir(folder) if n.endswith(".json"))
-        except OSError:
-            return
-        for name in names:
-            path = os.path.join(folder, name)
-            raw = read_agent_file(path) or b""
-            try:
-                os.unlink(path)
-            except OSError:
-                continue  # a post that stays would go out on every tick
-            try:
-                post = json.loads(raw)
-                sender, text = str(post["from"]), post["text"].strip()
-                # A lone surrogate (bad UTF-8 given to say) cannot go in the session file.
-                text = text.encode("utf-8", "replace").decode()
-            except (ValueError, TypeError, KeyError, AttributeError):
-                sender, text = "", ""
-            if not text:
-                self.event("error", f"could not read the room post {name}")
-                continue
-            # Only pantheon's window posts as you: agents can write here, and can pass
-            # say any --from.
-            self.post(sender if sender in self.agents else "someone", text)
+    def write_room(self) -> None:
+        """Write the room file that agents read: its newest entries, as text."""
+        self.room_changed = False
+        text = room_text(self.db, Path(self.scratch))
+        write_private(Path(self.room_file), text)
 
     def post(self, sender: str, text: str) -> None:
         """Put a post in the room, and give it to every other agent that runs, which
-        decides whether it needs to act. sender: an agent's name, someone, or you (from
+        decides whether it needs to act. sender: an agent's name, or you (from
         pantheon's window alone)."""
         a = self.agents.get(sender)
         event_id = self.event("say", text, a, {"from": sender})
@@ -3885,7 +3982,7 @@ class Session:
         """Room post event_id as pantheon types it into agent a."""
         author = PROMPTS["user"] if sender == "you" else sender
         message = PROMPTS["post"].format(
-            id=event_id, sender=author, text=text, commands=self.commands(a)
+            id=event_id, sender=author, text=text, room=self.room_again()
         )
         return Outgoing(message, "post", event_id=event_id)
 
@@ -4025,9 +4122,8 @@ class Session:
             parts += self.intro(a)
         parts += self.turn_parts(a, stage, track, rnd)
         if not first:
-            parts.append(self.commands(a))
-        path = os.path.join(self.scratch, name)
-        parts.append(self.result_text(a, stage, rnd, path))
+            parts.append(self.room_again())
+        parts.append(self.report_text(a, stage, rnd))
         parts.append(PROMPTS["step_end"].format(step=step_id))
         prompt = "\n\n".join(p for p in parts if p) + "\n"
         self.db.execute(
@@ -4040,7 +4136,7 @@ class Session:
         return self.step(step_id)
 
     def turn_parts(self, a: AgentRun, stage: str, track: int, rnd: int) -> list[str]:
-        """A turn's own part of its prompt: what to do, and the results so far it may
+        """A turn's own part of its prompt: what to do, and the reports so far it may
         need. On a track, those are that track's and those of stages with no tracks
         (after a pick, every track's, since the picked build takes from the others);
         with no track, all of them, with how each loop ended."""
@@ -4059,9 +4155,9 @@ class Session:
             rows = [r for r in rows if lanes[r["id"]] in (0, lane)]
         if not rows:
             return parts
-        # The results that made it this agent's turn: on a track, the track's newest;
+        # The reports that made it this agent's turn: on a track, the track's newest;
         # with no track, the stage's own newest, once it has one. Together, a turn is
-        # each instance's result: the newest by another agent, and the rest of its
+        # each instance's report: the newest by another agent, and the rest of its
         # round and role.
         before = rows if lane else [r for r in rows if r["stage"] == stage]
         if st.together:
@@ -4072,12 +4168,12 @@ class Session:
             turn = (newest["round"], newest["role"])
             came = [r for r in before if (r["round"], r["role"]) == turn]
         if len(came) == 1:
-            path = self.result_path(came[0])
+            path = self.report_path(came[0])
             parts.append(PROMPTS["came_in"].format(agent=came[0]["agent"], path=path))
         elif came:
             each = [
                 PROMPTS["came_in_line"].format(
-                    agent=r["agent"], path=self.result_path(r), status=r["status"]
+                    agent=r["agent"], path=self.report_path(r), status=r["status"]
                 )
                 for r in came
             ]
@@ -4088,7 +4184,7 @@ class Session:
                 PROMPTS["work_line"].format(
                     label=turn_label(r["stage"], r["round"], lanes[r["id"]]),
                     agent=r["agent"],
-                    path=self.result_path(r),
+                    path=self.report_path(r),
                     status=r["status"],
                 )
             )
@@ -4104,11 +4200,11 @@ class Session:
         parts.append(PROMPTS["work"].format(lines="\n".join(lines)))
         return parts
 
-    def result_text(self, a: AgentRun, stage: str, rnd: int, path: str) -> str:
-        """Where a turn's result goes, and the PANTHEON lines it may end with."""
+    def report_text(self, a: AgentRun, stage: str, rnd: int) -> str:
+        """What a turn's report is, and the PANTHEON[status] lines it may end with."""
         st = self.mode.stages[stage]
         statuses = statuses_of(st, len(self.keys))
-        text = result_lines(st.agents[a.role], path, statuses)
+        text = report_lines(st.agents[a.role], statuses)
         if st.loop:
             # Instances that take the turn at once each vote on the halt.
             each = st.together and self.mode.agents[a.role].multi and len(self.keys) > 1
@@ -4157,8 +4253,7 @@ class Session:
         if self.base and self.pre_existing:
             facts += PROMPTS["facts_dirty"].format(files=name_list(self.pre_existing))
         parts.append(facts)
-        room, say = room_command(self.slug), say_command(self.slug, a.name)
-        parts.append(PROMPTS["room"].format(room=room, say=say))
+        parts.append(PROMPTS["room"].format(room=self.room_file))
         rows = self.db.execute(
             "SELECT text, data FROM events WHERE kind = 'say' ORDER BY id"
         ).fetchall()
@@ -4177,9 +4272,8 @@ class Session:
         parts.append(PROMPTS["earlier"].format(posts="\n".join(lines)))
         return parts
 
-    def commands(self, a: AgentRun) -> str:
-        room, say = room_command(self.slug), say_command(self.slug, a.name)
-        return PROMPTS["commands"].format(room=room, say=say)
+    def room_again(self) -> str:
+        return PROMPTS["room_again"].format(room=self.room_file)
 
     async def dispatch(self, step) -> None:
         a = self.agent_by_id(step["agent_id"])
@@ -4352,13 +4446,7 @@ class Session:
                 )
             return
         a.waiting_since = 0.0
-        # A scroll during transport can leave tmux in copy mode, where Enter only ends
-        # copy mode.
-        mode = await self.tmux.run(
-            "display-message", "-p", "-t", target, "#{pane_in_mode}", check=False
-        )
-        if mode.strip() == "1":
-            await self.tmux.run("send-keys", "-t", target, "-X", "cancel", check=False)
+        await self.leave_copy_mode(target)
         text = clean_instructions(item.text, a.tool)
         buffer = f"pantheon-{a.name}"
         await self.tmux.run("load-buffer", "-b", buffer, "-", data=text.encode())
@@ -4418,29 +4506,82 @@ class Session:
         a.pasting = None
         self.needs_you(a, "what pantheon typed did not start a turn")
 
+    async def gemini_asks(self, a: AgentRun, now: float) -> None:
+        """A ✋ title in a yolo session: press 1, Allow once, on a dialog gemini opens
+        even in yolo (held_dialog), if allow_held says so."""
+        target = pane(a.name)
+        held = ""
+        if self.attached != a.name and a.may_answer:
+            screen = await self.tmux.run(
+                "capture-pane", "-p", "-J", "-t", target, check=False
+            )
+            held = held_dialog(screen)
+            if held:
+                await self.leave_copy_mode(target)
+        # allow_held checks again whether you came in: no await from there to the key.
+        if self.allow_held(a, held, now):
+            await self.tmux.run("send-keys", "-t", target, "1", check=False)
+
+    def allow_held(self, a: AgentRun, held: str, now: float) -> bool:
+        """Whether to press 1 on the held dialog (held_dialog's text) now. Not while you
+        are in its screen, or while gemini may not be in yolo (may_answer): then it
+        needs you at once. Else once for each dialog, since the next poll can still show
+        the old one. Any other dialog needs you once it had DIALOG_WAIT to show, as does
+        a held one that stays after its 1."""
+        if self.attached == a.name or not a.may_answer:
+            self.needs_you(a, GEMINI_ASKS)
+            return False
+        a.asked = a.asked or now
+        if held and held != a.allowed:
+            a.allowed, a.asked = held, now
+            self.set_state(a, "working")  # it may have needed you meanwhile
+            # One note for each run, also over a reopen, and no command in it: in the
+            # room, a command's flags and paths would hold the same ones that other
+            # gemini agents run, and gemini's own screen shows each command.
+            noted = self.db.execute(
+                "SELECT 1 FROM events WHERE agent_id = ? AND kind = 'note' AND text = ?"
+                " AND id > (SELECT COALESCE(MAX(id), 0) FROM events WHERE agent_id = ?"
+                " AND kind = 'start') LIMIT 1",
+                (a.id, PROMPTS["held"], a.id),
+            ).fetchone()
+            if noted is None:
+                self.event("note", PROMPTS["held"], a)
+            return True
+        if not held:
+            a.allowed = ""  # it went, so the same text again is a new dialog
+        if now - a.asked >= DIALOG_WAIT:
+            self.needs_you(a, GEMINI_ASKS)
+        return False
+
+    async def leave_copy_mode(self, target: str) -> None:
+        """A scroll during transport can leave tmux in copy mode, where keys only move
+        in it."""
+        mode = await self.tmux.run(
+            "display-message", "-p", "-t", target, "#{pane_in_mode}", check=False
+        )
+        if mode.strip() == "1":
+            await self.tmux.run("send-keys", "-t", target, "-X", "cancel", check=False)
+
     async def finish(self) -> None:
-        """The plan is done: name the last stage's results (each agent's last on each
-        track), or the ones that stopped it, and the agents that never had a turn."""
+        """The plan is done: name the agents of the last stage's reports (each one's
+        last on each track), or of the ones that stopped it, and the agents that never
+        had a turn."""
         self.set_session_state("done")
         rows = self.db.execute(
-            "SELECT s.name, s.stage, s.track, s.status, a.name AS agent FROM steps s"
+            "SELECT s.stage, s.track, s.status, a.name AS agent FROM steps s"
             " JOIN agents a ON a.id = s.agent_id ORDER BY s.id"
         ).fetchall()
         stops = [r for r in rows if r["status"] == "stop"]
         last_stage = stops[0]["stage"] if stops else list(self.mode.stages)[-1]
         last = {(r["track"], r["agent"]): r for r in rows if r["stage"] == last_stage}
         shown = stops or list(last.values())
-        results = ", ".join(
-            PROMPTS["done_result"].format(name=r["name"], agent=r["agent"])
-            for r in shown
-        )
+        agents = name_list(list(dict.fromkeys(r["agent"] for r in shown)))
+        s = "" if len(shown) == 1 else "s"
         if stops:
-            text = PROMPTS["stopped"].format(stage=last_stage, results=results)
+            text = PROMPTS["stopped"].format(stage=last_stage, agents=agents, s=s)
         else:
-            text = PROMPTS["done"].format(
-                results=results, s="" if len(last) == 1 else "s"
-            )
-        if not self.mode.stop_when_done:
+            text = PROMPTS["done"].format(agents=agents, s=s)
+        if not self.stop_when_done:
             text += PROMPTS["still_running"]
         unstarted = [
             name
@@ -4450,7 +4591,7 @@ class Session:
         if unstarted:
             text += PROMPTS["never_started"].format(names=name_list(unstarted))
         self.event("done", text)
-        if self.mode.stop_when_done:
+        if self.stop_when_done:
             await self.stop_agents()
             self.event("note", "Stopped the agents.")
 
@@ -4461,12 +4602,11 @@ class Session:
         if step is None or any(o.kind == "remind" for o in a.outbox):
             return
         a.typeable = a.typeable or a.state == "needs_you"
-        path = self.result_path(step)
-        result = self.result_text(a, step["stage"], step["round"], path)
+        report = self.report_text(a, step["stage"], step["round"])
         # The note's room id ends the text, so an earlier reminder ends another way.
         note = self.event("note", f"You reminded {a.name} to finish step {step['id']}.")
         text = PROMPTS["remind"].format(
-            step=step["id"], commands=self.commands(a), result=result, id=note
+            step=step["id"], room=self.room_again(), report=report, id=note
         )
         a.outbox.append(Outgoing(text, "remind", step["id"]))
 
@@ -4508,9 +4648,6 @@ class Session:
     async def stop_agents(self) -> None:
         """Stop every agent. The engine calls it, inside a tick, so no tick types into
         a dying agent or starts one, and no exit is news."""
-        # The rmtree below would lose the posts and the changed results; keep them.
-        self.read_posts()
-        self.refresh_results()
         await self.end_panes("-a")
         await self.tmux.run("kill-server", check=False)
         self.tmux.socket.unlink(missing_ok=True)
@@ -4683,11 +4820,9 @@ class Preview(Static):
 
 
 def long_entry(title: Content, body: str) -> Static | Collapsible:
-    """title, then the body, of which a collapsed entry shows 3 lines. Blank lines
-    and the PANTHEON status line (the title has the status) do not count."""
-    lines = [
-        x for x in body.splitlines() if x.strip() and not STATUS_RE.fullmatch(x.strip())
-    ]
+    """title, then the body, of which a collapsed entry shows 3 lines, with no blank
+    ones."""
+    lines = [x for x in body.splitlines() if x.strip()]
     if not lines:
         return Static(title)
     return Collapsible(
@@ -4699,9 +4834,12 @@ def long_entry(title: Content, body: str) -> Static | Collapsible:
 
 
 class Room(VerticalScroll):
+    # A long entry's header comes after its title's padding and ▶, 3 columns in, so
+    # the other entries start there too, and every header lines up.
     DEFAULT_CSS = """
     Room { height: 1fr; padding: 0 1; }
     Room > * { height: auto; }
+    Room > Static, Room > ActionEntry { padding-left: 3; }
     Room > Collapsible { border-top: none; padding: 0; }
     Room > Collapsible > Contents { padding: 0 0 0 3; }
     Room > Collapsible.-collapsed > Contents { display: block; }
@@ -4786,13 +4924,11 @@ class SessionView(Vertical):
         )
         data = json.loads(row["data"] or "{}")
         kind, text = row["kind"], row["text"]
-        if kind == "result":  # a revised one holds its own text
+        if kind == "report":  # which reads like a post
             step = s.step(data.get("step", 0))
-            title = Content.assemble(
-                *head, (f"{text} → {data.get('status', '')}", "bold")
-            )
-            body = data["text"] if "text" in data else step["result"] if step else ""
-            return long_entry(title, body)
+            first, _, rest = (step["report"] if step else "").partition("\n")
+            status = (f"[{data.get('status', '')}] ", "bold")
+            return long_entry(Content.assemble(*head, status, first), rest)
         if kind == "prompt" and a is not None:  # pantheon to the agent
             title = Content.assemble(
                 head[0],
@@ -4884,7 +5020,11 @@ class SwitcherScreen(ModalScreen):
     }
     SwitcherScreen OptionList { height: auto; max-height: 24; }
     """
-    BINDINGS = [Binding("escape", "close", "Close"), Binding("n", "new", "New session")]
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("n", "new", "New session"),
+        Binding("d", "delete", "Delete session"),
+    ]
 
     def __init__(self, open_sessions: dict[str, Session]):
         super().__init__()
@@ -4910,7 +5050,11 @@ class SwitcherScreen(ModalScreen):
         with Vertical():
             yield Static(Text("Sessions", style="bold"))
             yield OptionList(*options) if options else Static("No sessions yet.")
-            yield Static(Text("enter: open · n: new session · esc: close", style="dim"))
+            yield Static(
+                Text(
+                    "enter: open · n: new session · d: delete · esc: close", style="dim"
+                )
+            )
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(event.option_id)
@@ -4920,6 +5064,35 @@ class SwitcherScreen(ModalScreen):
 
     def action_new(self) -> None:
         self.dismiss("+new")
+
+    def action_delete(self) -> None:
+        found = self.query(OptionList)
+        option = found.first().highlighted_option if found else None
+        if option is None or option.id is None:
+            return
+        if option.id in self.open_sessions:  # its engine runs in this window
+            self.notify(f"{option.id} is open here; quit pantheon to delete it.")
+            return
+        question = (
+            f"Delete {option.id} for good? Its agents stop, if they still run, and its "
+            "record and reports go."
+        )
+        done = functools.partial(self.delete, option.id)
+        self.app.push_screen(ConfirmScreen(question), done)
+
+    async def delete(self, slug: str, yes: bool | None) -> None:
+        if not yes:
+            return
+        if not await asyncio.to_thread(delete_session, slug):
+            self.notify(
+                f"{slug} is open in another pantheon, or busy.", severity="error"
+            )
+            return
+        at = self.query_one(OptionList).highlighted or 0
+        await self.recompose()
+        for options in self.query(OptionList):  # none once the last session goes
+            options.highlighted = min(at, options.option_count - 1)
+            options.focus()
 
 
 class NewSessionScreen(ModalScreen):
@@ -4967,6 +5140,9 @@ class NewSessionScreen(ModalScreen):
             yield Checkbox(
                 "yolo: start agents with permission checks off", self.yolo, id="yolo"
             )
+            yield Checkbox(
+                "stop when done: stop the agents once the plan is done", id="stop"
+            )
             with Horizontal():
                 yield Button("Start", variant="primary", id="start")
                 yield Button("Cancel", id="cancel")
@@ -4981,6 +5157,7 @@ class NewSessionScreen(ModalScreen):
                 yolo=self.query_one("#yolo", Checkbox).value,
                 agents=self.query_one("#agents", Input).value.strip(),
                 effort=None if effort == "mode" else effort_arg(effort),
+                stop_when_done=self.query_one("#stop", Checkbox).value,
             )
         )
 
@@ -5006,8 +5183,12 @@ class ConfirmScreen(ModalScreen):
     }
     ConfirmScreen Horizontal { height: auto; }
     """
-    BINDINGS = [Binding("escape", "no", "No")]
-    AUTO_FOCUS = "#no"  # a stray Enter must not end a session
+    BINDINGS = [
+        Binding("y", "yes", "Yes"),
+        Binding("n", "no", "No"),
+        Binding("escape", "no", "No"),
+    ]
+    AUTO_FOCUS = "#no"  # a stray Enter must not end or delete a session
 
     def __init__(self, question: str):
         super().__init__()
@@ -5017,11 +5198,14 @@ class ConfirmScreen(ModalScreen):
         with Vertical():
             yield Static(Content(self.question))
             with Horizontal():
-                yield Button("Yes", variant="error", id="yes")
-                yield Button("No", id="no")
+                yield Button("Yes (y)", variant="error", id="yes")
+                yield Button("No (n)", id="no")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
+
+    def action_yes(self) -> None:
+        self.dismiss(True)
 
     def action_no(self) -> None:
         self.dismiss(False)
@@ -5286,6 +5470,7 @@ class PantheonApp(App):
             return
         token = object()
         s.attached, s.attach_token = name, token  # first, so restart() leaves it alone
+        a.may_answer = None  # you may change gemini's mode in its screen
         error: BaseException | None = None
         try:
             try:  # restart() kills an exited agent's session, and a server can die
@@ -5586,25 +5771,9 @@ def cmd_sessions(prune: int | None) -> None:
             finished = r["state"] in ("done", "ended")
             if r["holder"] or not (idle > STALE_DAYS or (finished and idle > prune)):
                 continue
-            # Hold its lock until the file is gone, so a pantheon that opens it
-            # meanwhile is turned away rather than left with no file.
-            try:
-                held = connect(db_path(r["slug"]))
-            except sqlite3.Error:
-                continue
-            try:
-                take_lock(held, r["slug"])
-            except (Locked, sqlite3.Error):
-                held.close()
-                continue  # opened since the list, or busy: the next prune tries again
-            stop_server_sync(r["slug"])
-            shutil.rmtree(scratch_dir(r["slug"]), ignore_errors=True)
-            for path in private_files(r["slug"]):
-                path.unlink(missing_ok=True)
-            for suffix in ("", "-journal"):
-                Path(f"{db_path(r['slug'])}{suffix}").unlink(missing_ok=True)
-            held.close()
-            print(f"deleted {r['slug']}")
+            # One opened since the list, or busy, waits for the next prune.
+            if delete_session(r["slug"]):
+                print(f"deleted {r['slug']}")
         rows = list_sessions()
     if not rows:
         print("No sessions yet. Start one with: pantheon start MODE TASK")
@@ -5627,23 +5796,26 @@ def cmd_show(slug: str, name: str) -> None:
     db = None
     try:
         db = connect(path)
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if version != SCHEMA_VERSION:  # as Session.check_file: no code reads old files
+            raise sqlite3.DatabaseError(
+                f"it has schema version {version}; this pantheon reads {SCHEMA_VERSION}"
+            )
         s = db.execute("SELECT * FROM session").fetchone()
         if s is None:
             raise sqlite3.DatabaseError("it has no session record")
         steps = db.execute(
             "SELECT s.*, a.name AS agent FROM steps s JOIN agents a ON a.id = s.agent_id ORDER BY s.id"
         ).fetchall()
-        newest = revisions(db)
         if name:
-            done = [r for r in steps if r["result"]]
+            done = [r for r in steps if r["status"] != "open"]
             hits = [r for r in done if r["name"] in (name, f"{name}.md")] or [
                 r for r in done if name in r["name"]
             ]
             if len(hits) != 1:
                 names = ", ".join(r["name"] for r in done) or "none yet"
-                die(f"{name!r} matches {len(hits)} results; this session has: {names}")
-            text = newest.get(hits[0]["id"], hits[0]["result"])
-            sys.stdout.write(text.rstrip("\n") + "\n")
+                die(f"{name!r} matches {len(hits)} reports; this session has: {names}")
+            sys.stdout.write(hits[0]["report"].rstrip("\n") + "\n")
             return
         room = room_entries(db, run_dir_of(path), full=True)
         roster = db.execute("SELECT * FROM roster WHERE listed = 1 ORDER BY id")
@@ -5662,26 +5834,12 @@ def cmd_show(slug: str, name: str) -> None:
     names = max([12] + [len(r["name"]) for r in steps])
     width = max([12] + [len(r["agent"]) for r in steps])
     if steps:
-        print("\nResults (pantheon show SLUG NAME prints one, as it is now):")
+        print("\nReports (pantheon show SLUG NAME prints one):")
         for r in steps:
-            status = r["status"] + (" (revised)" if r["id"] in newest else "")
-            print(f"  {r['name']:<{names}} {r['agent']:<{width}} {status}")
+            print(f"  {r['name']:<{names}} {r['agent']:<{width}} {r['status']}")
     print("\nRoom:")
     for entry in room:
         print(textwrap.indent(entry, "  "))
-
-
-def session_file(target: str) -> Path:
-    """A session file from its path, which agents give (codex may drop PANTHEON_HOME
-    from their environment), or from its slug, which people give."""
-    if os.sep not in target:
-        return db_path(resolve_slug(target))
-    path = Path(target)
-    # say writes beside it, in ../../run/<slug>/posts, so it must be a session file.
-    named = path.suffix == ".sqlite3" and path.parent.name == "sessions"
-    if not named or not path.is_file():
-        die(f"no session file at {target}")
-    return path
 
 
 def run_dir_of(path: Path) -> Path:
@@ -5693,24 +5851,26 @@ def room_entries(
     db: sqlite3.Connection, run_dir: Path, last: int = 0, full: bool = False
 ) -> list[str]:
     """The room as text, oldest first: an entry for each event but hooks, with a
-    result by its file, and a prompt by its step, or with full, in full. last: only
-    the last N entries."""
+    report's first line and the file that holds all of it, and a prompt by its step;
+    or with full, both in full. last: only the last N entries."""
     events = db.execute(
         "SELECT e.*, a.name AS agent FROM events e LEFT JOIN agents a ON a.id = e.agent_id"
         " WHERE e.kind != 'hook' ORDER BY e.id DESC LIMIT ?",
         (last if last > 0 else -1,),
     ).fetchall()
-    names = {r["id"]: r["name"] for r in db.execute("SELECT id, name FROM steps")}
+    steps = {r["id"]: r for r in db.execute("SELECT id, name, report FROM steps")}
     out = []
     for e in reversed(events):
         data = json.loads(e["data"] or "{}")
         who, kind = e["agent"] or "pantheon", e["kind"]
         first, _, rest = e["text"].partition("\n")
         head = f"{who}: {first}"
-        if kind == "result":
-            head = f"{who}: {e['text']} → {data.get('status', '')}"
-            name = names.get(data.get("step"))
-            rest = str(run_dir / name) if name else ""
+        if kind == "report":  # a long one would push the rest of the room out
+            step = steps.get(data.get("step"))
+            first, _, rest = (step["report"] if step else "").partition("\n")
+            head = f"{who} reports [{data.get('status', '')}]: {first}"
+            if rest.strip() and not full:
+                rest = str(run_dir / step["name"])
         elif kind == "prompt":  # each first prompt holds the task: too long for agents
             what = f"{data.get('label', '')} (step {data.get('step')})"
             head, rest = f"pantheon → {who}: {what}", e["text"] if full else ""
@@ -5724,66 +5884,21 @@ def room_entries(
     return out
 
 
-def cmd_room(target: str, last: int) -> int:
-    """Print the room's last entries, for an agent. It opens the session file
-    read-only and takes no lock, so it runs beside the pantheon that has the session
-    open, and in a sandbox that cannot write the file."""
-    path = session_file(target)
-    try:
-        db = connect(path, "ro")
-        try:
-            entries = room_entries(db, run_dir_of(path), last)
-        finally:
-            db.close()  # before printing: an open read would hold up pantheon's writes
-    except sqlite3.Error as e:
-        if getattr(e, "sqlite_errorname", "") == "SQLITE_READONLY_ROLLBACK":
-            die(
-                "the session file needs repair after a crash; reopening the session in "
-                "pantheon repairs it"
-            )
-        die(f"cannot read the room ({e}); try again in a moment")
-    kept, size = [], 0  # the newest entries that fit
-    for entry in reversed(entries):
+def room_text(db: sqlite3.Connection, run_dir: Path) -> str:
+    """The room file: the newest entries that fit in ROOM_CHARS, oldest first, after a
+    line that says how many it left out."""
+    kept, size = [], 0
+    for entry in reversed(room_entries(db, run_dir, ROOM_ENTRIES)):
         if size + len(entry) + 1 > ROOM_CHARS:
             if not kept:  # one entry is too long on its own
                 kept.append(entry[: ROOM_CHARS - 2] + " …")
             break
         kept.append(entry)
         size += len(entry) + 1
-    left = len(entries) - len(kept)
+    total = db.execute("SELECT COUNT(*) FROM events WHERE kind != 'hook'").fetchone()[0]
+    left = total - len(kept)
     cut = PROMPTS["room_cut"].format(n=left, y="y" if left == 1 else "ies")
-    lines = ([cut] if left else []) + kept[::-1]
-    try:
-        sys.stdout.write("".join(line + "\n" for line in lines))  # in one write
-        sys.stdout.flush()
-    except BrokenPipeError:  # the reader stopped early
-        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-    return 0
-
-
-def cmd_say(target: str, sender: str, words: list[str]) -> int:
-    """Post to the room. The post goes in a file for the pantheon that has the session
-    open, since codex's sandbox cannot write the session file."""
-    path = session_file(target)
-    text = (sys.stdin.read() if words == ["-"] else " ".join(words)).strip()
-    if not text:
-        die("say needs a message")
-    # Not you: only pantheon's window posts as you (see read_posts).
-    sender = sender or os.environ.get("PANTHEON_AGENT") or "someone"
-    post = {"from": sender, "text": text, "at": now_iso()}
-    folder = run_dir_of(path) / "posts"
-    try:
-        private_dir(folder)
-        # Named by time, so posts go out in order. write_private renames the file into
-        # place, so pantheon never reads half a post.
-        write_private(folder / f"{time.time_ns()}-{os.getpid()}.json", json.dumps(post))
-    except (OSError, ValueError) as e:
-        die(f"cannot post to {path.stem}: {e}")
-    if session_holder(path):
-        print("pantheon: posted to the room")
-    else:
-        print(f"pantheon: posted; it waits until a pantheon opens {path.stem}")
-    return 0
+    return "".join(line + "\n" for line in ([cut] if left else []) + kept[::-1])
 
 
 def mode_description(mode: Mode) -> str:
@@ -5842,6 +5957,77 @@ def mode_problems() -> list[str]:
     return out
 
 
+def add_modes(
+    parser: argparse.ArgumentParser, common: argparse.ArgumentParser, start: bool
+) -> dict[str, argparse.ArgumentParser]:
+    """parser's MODE argument, for start or a test scenario: a parser for each mode,
+    with its options; for start, help MODE too."""
+    modes = parser.add_subparsers(
+        dest="mode", metavar="MODE", title="modes", required=True
+    )
+    out = {}
+    for name, mode in MODES.items():
+        out[name] = modes.add_parser(
+            name,
+            parents=[common],
+            help=mode.help,
+            description=mode_description(mode),
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            allow_abbrev=False,  # so --agent never stands for --agents
+        )
+        add_mode_options(out[name], mode, start)
+    if start:
+        modes.add_parser(
+            "help", help="show the modes, or one mode's options"
+        ).add_argument("topic", nargs="?", choices=list(MODES), metavar="MODE")
+    return out
+
+
+def add_mode_options(p: argparse.ArgumentParser, mode: Mode, start: bool) -> None:
+    """A mode's options: start's, or a test scenario's, which makes its own dir and
+    task."""
+    if start:
+        p.add_argument(
+            "-C", "--dir", default=".", metavar="DIR", help="start in DIR (default: .)"
+        )
+    p.add_argument(
+        "-a",
+        "--agents",
+        default="",
+        metavar="N|SPEC,...",
+        help=f"how many tools, or which ones in order (default: {count_help(mode)})",
+    )
+    singles = [r for r, agent in mode.agents.items() if not agent.multi]
+    p.add_argument(
+        "--agent",
+        action="append",
+        default=[],
+        metavar="ROLE=SPEC",
+        help="the tool for one single agent: "
+        + (", ".join(singles) or "none in this mode"),
+    )
+    p.add_argument(
+        "--effort",
+        choices=[*EFFORTS, "default"],
+        metavar="LEVEL",
+        help=f"an effort level ({', '.join(EFFORTS)}), or default for the tools' own "
+        f"config (this mode: {mode.effort or 'default'})",
+    )
+    p.add_argument(
+        "--stop-when-done",
+        action="store_true",
+        help="stop the agents once the plan is done: a one-shot run (else they keep "
+        "running, for more work in the room)",
+    )
+    if start:
+        p.add_argument(
+            "task",
+            nargs="+" if mode.needs_task else "*",
+            metavar="TASK",
+            help="free text, an issue number (123, #123), or an issue URL",
+        )
+
+
 def build_parser() -> tuple[argparse.ArgumentParser, dict]:
     # -y works before or after the command; SUPPRESS keeps a subcommand from resetting it.
     common = argparse.ArgumentParser(add_help=False)
@@ -5866,55 +6052,45 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict]:
         help="start a session",
         description="Start a session in one of these modes.",
     )
-    modes = subs["start"].add_subparsers(
-        dest="mode", metavar="MODE", title="modes", required=True
+    subs.update(add_modes(subs["start"], common, start=True))  # for help MODE
+    subs["test"] = sub.add_parser(
+        "test",
+        help="run pantheon's unit tests, or try a mode on a toy task",
+        description="Run pantheon's unit tests, or try a mode on a toy task: a "
+        "scenario starts a session of the mode on its task, in a new, empty git repo in "
+        "a temp dir, which stays after pantheon exits.",
     )
-    for name, mode in MODES.items():
-        p = modes.add_parser(
+    scenarios = subs["test"].add_subparsers(
+        dest="scenario", metavar="SCENARIO", title="scenarios", required=True
+    )
+    unit = scenarios.add_parser(
+        "unit",
+        help="run pantheon's own unit tests, which start no agents",
+        description="Run pantheon's own unit tests. They start no agents and no tmux, "
+        "and keep their files in a scratch dir, apart from yours.",
+    )
+    unit.add_argument("-v", "--verbose", action="store_true", help="name each test")
+    unit.add_argument(
+        "-k",
+        dest="patterns",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="run only the tests whose names match PATTERN, as unittest's -k does",
+    )
+    for name, task in SCENARIOS.items():
+        about = (
+            "Start a session of MODE on this task, in a new, empty git repo in a temp "
+            "dir, which stays after pantheon exits:"
+        )
+        p = scenarios.add_parser(
             name,
             parents=[common],
-            help=mode.help,
-            description=mode_description(mode),
+            help=f"try a mode on the {name} task",
+            description=textwrap.fill(about, 80) + "\n\n" + textwrap.fill(task, 80),
             formatter_class=argparse.RawDescriptionHelpFormatter,
-            allow_abbrev=False,  # so --agent never stands for --agents
         )
-        p.add_argument(
-            "-C", "--dir", default=".", metavar="DIR", help="start in DIR (default: .)"
-        )
-        p.add_argument(
-            "-a",
-            "--agents",
-            default="",
-            metavar="N|SPEC,...",
-            help="how many tools, or which ones in order "
-            f"(default: {count_help(mode)})",
-        )
-        singles = [r for r, agent in mode.agents.items() if not agent.multi]
-        p.add_argument(
-            "--agent",
-            action="append",
-            default=[],
-            metavar="ROLE=SPEC",
-            help="the tool for one single agent: "
-            + (", ".join(singles) or "none in this mode"),
-        )
-        p.add_argument(
-            "--effort",
-            choices=[*EFFORTS, "default"],
-            metavar="LEVEL",
-            help=f"an effort level ({', '.join(EFFORTS)}), or default for the tools' own "
-            f"config (this mode: {mode.effort or 'default'})",
-        )
-        p.add_argument(
-            "task",
-            nargs="+" if mode.needs_task else "*",
-            metavar="TASK",
-            help="free text, an issue number (123, #123), or an issue URL",
-        )
-        subs[name] = p
-    modes.add_parser("help", help="show the modes, or one mode's options").add_argument(
-        "topic", nargs="?", choices=list(MODES), metavar="MODE"
-    )
+        add_modes(p, common, start=False)
     subs["session"] = sub.add_parser("session", help="open a session")
     subs["session"].add_argument(
         "slug", metavar="SLUG", help="the session (a unique part is enough)"
@@ -5928,7 +6104,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict]:
         f"ones: any with none for {STALE_DAYS} days (an open one stays)",
     )
     subs["show"] = sub.add_parser(
-        "show", help="print a session's room, or one of its results"
+        "show", help="print a session's room, or one of its reports"
     )
     subs["show"].add_argument(
         "slug", metavar="SLUG", help="the session (a unique part is enough)"
@@ -5938,52 +6114,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict]:
         nargs="?",
         default="",
         metavar="NAME",
-        help="a result's file name, or a unique part of it",
-    )
-    subs["room"] = sub.add_parser(
-        "room",
-        help="print a session's room",
-        description="Print a session's room, oldest first: its last entries, with a "
-        "prompt by its step and a result by its file. It takes no lock, so it works "
-        "while pantheon has the session open.",
-    )
-    subs["room"].add_argument(
-        "session",
-        metavar="SESSION",
-        help="the session file, or its slug (a unique part is enough)",
-    )
-    subs["room"].add_argument(
-        "--last",
-        type=int,
-        default=ROOM_LAST,
-        metavar="N",
-        help=f"how many (default: {ROOM_LAST})",
-    )
-    subs["say"] = sub.add_parser(
-        "say",
-        help="post to a session's room; agents use it",
-        description="Post to a session's room. Pantheon gives the post to every agent "
-        "but its author, and each decides whether it needs to act. A post from here "
-        "is someone's, unless it names one of the session's agents: only pantheon's "
-        "window (ctrl+s) posts as you.",
-    )
-    subs["say"].add_argument(
-        "session",
-        metavar="SESSION",
-        help="the session file, or its slug (a unique part is enough)",
-    )
-    subs["say"].add_argument(
-        "--from",
-        dest="sender",
-        default="",
-        metavar="NAME",
-        help="the agent that posts (default: $PANTHEON_AGENT, else someone)",
-    )
-    subs["say"].add_argument(
-        "message",
-        nargs="+",
-        metavar="MESSAGE",
-        help="the post, or - to read it from stdin",
+        help="a report's file name, or a unique part of it",
     )
     subs["config"] = sub.add_parser(
         "config",
@@ -6060,12 +6191,8 @@ def main(argv: list[str] | None = None) -> int:
     if command == "start" and args.mode == "help":
         subs[args.topic or "start"].print_help()
         return 0
-    # Agents run these in their tools' sandboxes: no dirs to make, no lock, and no
-    # update prompt (codex runs commands on a terminal, where the prompt would wait).
-    if command == "room":
-        return cmd_room(args.session, args.last)
-    if command == "say":
-        return cmd_say(args.session, args.sender, args.message)
+    if command == "test" and args.scenario == "unit":  # before pantheon uses its home
+        return cmd_unit_tests(args.verbose, args.patterns)
     try:
         for path in (HOME, SESSIONS, RUN):
             private_dir(path)
@@ -6078,11 +6205,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:  # Ctrl-C while it checks or asks: you want out
         return 130
     if (
-        command in (None, "start", "session")
+        command in (None, "start", "test", "session")
         or getattr(args, "prune", None) is not None
     ):
         tmux_path()  # these run agents: fail now, before a session starts
-    if command in (None, "start", "session"):
+    if command in (None, "start", "test", "session"):
         try:  # here, so a bad key file stops pantheon with its message, not a traceback
             install_key()
         except (OSError, ValueError) as e:
@@ -6108,19 +6235,25 @@ def main(argv: list[str] | None = None) -> int:
         if holder:
             die(f"{slug} is open in another pantheon (pid {holder})")
         return run_ui(cfg, slug, yolo_flag)
-    if command == "start":
-        task = " ".join(args.task)
+    if command in ("start", "test"):
         yolo = setting(cfg, "yolo") if yolo_flag is None else yolo_flag
-        req = NewSession(
-            args.mode,
-            task,
-            args.dir,
-            yolo,
-            args.agents,
-            args.agent,
-            effort_arg(args.effort),
-        )
         try:
+            if command == "test":
+                workdir = scenario_repo()
+                task = SCENARIOS[args.scenario] if MODES[args.mode].needs_task else ""
+                print(f"pantheon: {args.scenario} for {args.mode}, in {workdir}")
+            else:
+                workdir, task = args.dir, " ".join(args.task)
+            req = NewSession(
+                args.mode,
+                task,
+                workdir,
+                yolo,
+                args.agents,
+                args.agent,
+                effort_arg(args.effort),
+                args.stop_when_done,
+            )
             slug, notes = prepare(cfg, req, confirm_dirty)
         except PrepError as e:
             die(str(e))
@@ -6128,6 +6261,1371 @@ def main(argv: list[str] | None = None) -> int:
             print(f"pantheon: {note}")
         return run_ui(cfg, slug, yolo_flag)
     return run_ui(cfg, None, yolo_flag)
+
+
+# ------------------------------------------------------------------------------ unit tests
+
+# pantheon test unit runs these: no agents, no tmux, and their files in a scratch home.
+MODULE = sys.modules[__name__]  # for the patches
+
+
+def cmd_unit_tests(verbose: bool, patterns: list[str]) -> int:
+    """Run the unit tests below. Pantheon reads its home, and gemini's, once as it
+    loads, so a new pantheon runs them, with both in a new scratch dir."""
+    scratch = os.environ.get("PANTHEON_UNIT_HOME", "")
+    if not scratch or HOME != Path(scratch):
+        with tempfile.TemporaryDirectory(prefix="pantheon-tests-") as scratch:
+            env = {
+                **os.environ,
+                "PANTHEON_HOME": scratch,
+                "PANTHEON_UNIT_HOME": scratch,
+            }
+            env["GEMINI_CLI_HOME"] = scratch  # so no test reads your gemini files
+            argv = ["test", "unit", *(["-v"] if verbose else [])]
+            argv += [x for p in patterns for x in ("-k", p)]
+            cmd = [sys.executable, "-I", "-B", str(program_path()), *argv]
+            return subprocess.run(cmd, env=env).returncode
+    for folder in (HOME, SESSIONS, RUN):  # as main makes them
+        private_dir(folder)
+    loader = unittest.TestLoader()
+    # As unittest's own -k: a pattern with no * matches any part of a name.
+    loader.testNamePatterns = [p if "*" in p else f"*{p}*" for p in patterns] or None
+    suite = loader.loadTestsFromModule(MODULE)
+    result = unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite)
+    return 0 if result.wasSuccessful() else 1
+
+
+BAKEOFF = MODES["bakeoff"]
+DEVELOP = MODES["develop"]
+
+FINE = "Fine.\nPANTHEON[status]: go"  # the last message of a check that goes on
+
+# A mode for the session tests. Its agents get turns and prompts, but none starts.
+FAKE = Mode(
+    help="a test mode",
+    agents={"checker": Agent("You check."), "builder": Agent("You build.", True)},
+    stages={
+        "check": Stage("The checker checks.", {"checker": "your check"}, go_if="ok"),
+        "build": Stage("Each builder builds.", {"builder": "your build"}),
+    },
+    needs_task=False,
+    needs_git=False,
+)
+
+
+class PlanTest(unittest.TestCase):
+    def test_modes_have_no_problems(self):
+        self.assertEqual(mode_problems(), [])
+
+    def test_a_loop_with_go_if_is_a_problem(self):
+        build = replace(BAKEOFF.stages["build"], go_if="ok")
+        stages = {**BAKEOFF.stages, "build": build}
+        MODES["bad"] = replace(BAKEOFF, stages=stages)
+        try:
+            self.assertEqual(
+                mode_problems(), ["bad.build: a stage with a loop can't have go_if"]
+            )
+        finally:
+            del MODES["bad"]
+
+    def test_a_pick_is_one_turn(self):
+        compare = replace(BAKEOFF.stages["compare"], agents={"architect": "x"})
+        stages = {**BAKEOFF.stages, "compare": compare}
+        MODES["bad"] = replace(BAKEOFF, stages=stages)
+        try:
+            self.assertEqual(
+                mode_problems(),
+                [
+                    "bad.compare: a stage that picks a track has one single agent, "
+                    "and no loop or go_if"
+                ],
+            )
+        finally:
+            del MODES["bad"]
+
+    def test_statuses(self):
+        st = BAKEOFF.stages
+        self.assertEqual(statuses_of(st["check"], 3), ("go", "stop"))
+        self.assertEqual(statuses_of(st["design"], 3), ("done",))
+        self.assertEqual(statuses_of(st["build"], 3), ("continue", "halt"))
+        self.assertEqual(
+            statuses_of(st["compare"], 3), ("track-1", "track-2", "track-3", "stop")
+        )
+
+    def test_bakeoff_checks_first(self):
+        self.assertEqual(
+            plan_turns(BAKEOFF, 3, []), [("check", 0, 0, "chief-architect")]
+        )
+        self.assertEqual(plan_turns(BAKEOFF, 3, [("check", 0, "open")]), [])
+
+    def test_go_starts_the_design(self):
+        self.assertEqual(
+            plan_turns(BAKEOFF, 3, [("check", 0, "go")]),
+            [("design", t, 0, "architect") for t in (1, 2, 3)],
+        )
+
+    def test_stop_ends_the_plan(self):
+        self.assertIsNone(plan_turns(BAKEOFF, 3, [("check", 0, "stop")]))
+
+    def built(self):
+        """The steps of a bakeoff on two tracks, up to its compare stage."""
+        steps = [("check", 0, "go"), ("design", 1, "done"), ("design", 2, "done")]
+        # Track 1 halts in round 2; track 2 runs out of its 5 rounds.
+        steps += [("build", 1, s) for s in ("continue",) * 3 + ("halt",)]
+        steps += [("build", 2, "continue")] * 10
+        return steps
+
+    def test_bakeoff_runs_to_the_end(self):
+        steps = self.built()[:-1]
+        self.assertEqual(plan_turns(BAKEOFF, 2, steps), [("build", 2, 5, "reviewer")])
+        steps = self.built()
+        compare = [("compare", 0, 0, "chief-architect")]
+        self.assertEqual(plan_turns(BAKEOFF, 2, steps), compare)
+        steps.append(("compare", 0, "track-2"))
+        refine = [("refine", 0, 0, "chief-architect")]
+        self.assertEqual(plan_turns(BAKEOFF, 2, steps), refine)
+        steps.append(("refine", 0, "done"))
+        # The finish runs on the picked track alone.
+        self.assertEqual(plan_turns(BAKEOFF, 2, steps), [("finish", 2, 1, "developer")])
+        steps += [("finish", 2, "continue")]
+        self.assertEqual(plan_turns(BAKEOFF, 2, steps), [("finish", 2, 1, "reviewer")])
+        self.assertIsNone(plan_turns(BAKEOFF, 2, steps + [("finish", 2, "halt")]))
+
+    def test_a_compare_stop_ends_the_plan(self):
+        steps = self.built() + [("compare", 0, "stop")]
+        self.assertIsNone(plan_turns(BAKEOFF, 2, steps))
+
+    def test_a_stop_waits_for_every_track(self):
+        mode = replace(
+            FAKE,
+            stages={
+                "check": Stage("g", {"builder": "x"}, go_if="ok"),
+                "next": Stage("g", {"checker": "y"}),
+            },
+        )
+        self.assertEqual(
+            plan_turns(mode, 2, [("check", 1, "stop")]), [("check", 2, 0, "builder")]
+        )
+        self.assertEqual(
+            plan_turns(mode, 2, [("check", 1, "stop"), ("check", 2, "open")]), []
+        )
+        self.assertIsNone(
+            plan_turns(mode, 2, [("check", 1, "stop"), ("check", 2, "go")])
+        )
+        self.assertEqual(
+            plan_turns(mode, 2, [("check", 1, "go"), ("check", 2, "go")]),
+            [("next", 0, 0, "checker")],
+        )
+
+    def test_develop_reviewers_review_at_once(self):
+        self.assertEqual(plan_turns(DEVELOP, 3, []), [("build", 0, 1, "developer")])
+        steps = [("build", 0, "continue")]
+        self.assertEqual(
+            plan_turns(DEVELOP, 3, steps),
+            [("build", t, 1, "reviewer") for t in (1, 2, 3)],
+        )
+        steps += [("build", 1, "halt"), ("build", 2, "open"), ("build", 3, "halt")]
+        self.assertEqual(plan_turns(DEVELOP, 3, steps), [])
+
+    def test_develop_halts_only_when_every_reviewer_does(self):
+        steps = [("build", 0, "continue")]
+        steps += [("build", 1, "halt"), ("build", 2, "continue"), ("build", 3, "halt")]
+        self.assertEqual(plan_turns(DEVELOP, 3, steps), [("build", 0, 2, "developer")])
+        steps += [("build", 0, "continue")] + [("build", t, "halt") for t in (1, 2, 3)]
+        self.assertIsNone(plan_turns(DEVELOP, 3, steps))
+
+    def test_develop_halts_when_the_developer_does(self):
+        steps = [("build", 0, "continue")] + [("build", t, "continue") for t in (1, 2)]
+        self.assertIsNone(plan_turns(DEVELOP, 2, steps + [("build", 0, "halt")]))
+
+    def test_develop_runs_out_of_rounds(self):
+        steps = [("build", t, "continue") for t in (0, 1, 2)] * 5
+        self.assertIsNone(plan_turns(DEVELOP, 2, steps))
+        self.assertEqual(
+            plan_turns(DEVELOP, 2, steps[:-1]), [("build", 2, 5, "reviewer")]
+        )
+
+    def test_develop_starts_a_reviewer_that_lost_its_turn(self):
+        # Track 2's turn went back to the plan (see exited), so its step is gone.
+        steps = [("build", 0, "continue"), ("build", 1, "halt"), ("build", 3, "open")]
+        self.assertEqual(plan_turns(DEVELOP, 3, steps), [("build", 2, 1, "reviewer")])
+
+    def test_hello(self):
+        hello = MODES["hello"]
+        self.assertEqual(
+            plan_turns(hello, 2, [("hello", 1, "done")]), [("hello", 2, 0, "greeter")]
+        )
+        steps = [("hello", 1, "done"), ("hello", 2, "done")]
+        self.assertEqual(
+            plan_turns(hello, 2, steps), [("reply", t, 0, "greeter") for t in (1, 2)]
+        )
+
+    def test_plan_text(self):
+        text = plan_text(BAKEOFF)
+        self.assertTrue(text.startswith("The plan: check the task, design"))
+        self.assertIn("1. check: chief-architect. The chief architect checks", text)
+        go = PROMPTS["plan_go"].format(go_if=BAKEOFF.stages["check"].go_if)
+        self.assertEqual(text.count(go), 1)
+        self.assertIn("2. design: architect, on each track.", text)
+        self.assertIn("Its agent picks the track with the build to keep:", text)
+        self.assertIn("6. finish: developer, then reviewer, on the picked track.", text)
+        self.assertNotIn("The plan goes on only if", plan_text(MODES["hello"]))
+
+    def test_develop_plan_text(self):
+        text = plan_text(DEVELOP)
+        self.assertIn("1. build: developer, then every reviewer at once.", text)
+        self.assertIn(PROMPTS["plan_together"], text)
+        self.assertNotIn("track", text.split("\n\n", 1)[1])
+
+    def test_turn_label(self):
+        self.assertEqual(turn_label("build", 2, 1), "build round 2, track 1")
+        self.assertEqual(turn_label("check", 0, 0), "check")
+
+    def test_on_this_machine(self):
+        local = ("http://127.0.0.1:11434", "http://localhost", "http://[::1]:11434")
+        for url in local:
+            self.assertTrue(on_this_machine(url), url)
+        remote = (
+            "http://10.0.0.5:11434",
+            "https://ollama.example.com",
+            "http://mac.lan",
+        )
+        for url in remote:
+            self.assertFalse(on_this_machine(url), url)
+
+
+class ReplyTest(unittest.TestCase):
+    """The last message of an agent's turn, as read_reply reads it: its posts, its
+    status, and the rest, which is the turn's report."""
+
+    def test_a_report(self):
+        text = "All clear.\n\nPANTHEON[status]: go\n"
+        self.assertEqual(read_reply(text), ([], "go", "All clear."))
+
+    def test_the_status(self):
+        for line in ("pantheon [Status]: Stop", "**PANTHEON[status]:** `stop`"):
+            self.assertEqual(read_reply(line)[1], "stop", line)
+        self.assertEqual(read_reply("PANTHEON[status]: Track-2")[1], "track-2")
+        both = "PANTHEON[status]: go\nPANTHEON[status]: stop"
+        self.assertEqual(read_reply(both)[1], "stop")  # the last one counts
+        for none in ("Done, as in PANTHEON[status]: go", "PANTHEON[status]:"):
+            self.assertEqual(read_reply(none)[1], "", none)
+
+    def test_a_post_ends_the_message(self):
+        text = "I checked it.\n\nPANTHEON[say]: builder-codex: the tests fail on main."
+        self.assertEqual(
+            read_reply(text),
+            (["builder-codex: the tests fail on main."], "", "I checked it."),
+        )
+
+    def test_a_post_can_have_more_lines(self):
+        text = "Done.\nPANTHEON[say]: Two problems:\n\n- one\n- two\n"
+        self.assertEqual(read_reply(text)[0], ["Two problems:\n\n- one\n- two"])
+
+    def test_each_marker_starts_a_post_or_ends_one(self):
+        text = "PANTHEON[say]: one\nPANTHEON[say]:\ntwo\nPANTHEON[status]: done\nafter"
+        self.assertEqual(read_reply(text), (["one", "two"], "done", "after"))
+
+    def test_models_dress_it_up(self):
+        for line in (
+            "**PANTHEON[say]:** hi",
+            "> pantheon [Say]: hi",
+            "- PANTHEON[say]: hi",
+        ):
+            self.assertEqual(read_reply(line)[0], ["hi"], line)
+
+    def test_a_quoted_marker_is_text(self):
+        text = (
+            "Agents end with these lines:\n\n```\nPANTHEON[say]: your message\n"
+            "PANTHEON[status]: done\n```\n\nOr in a sentence, as PANTHEON[say]: x."
+        )
+        self.assertEqual(read_reply(text), ([], "", text))
+        # But a code block in a post is part of it.
+        post = "PANTHEON[say]: Run:\n```\nmake test\nPANTHEON[say]: no\n```"
+        self.assertEqual(read_reply(post)[0], [post.removeprefix("PANTHEON[say]: ")])
+
+    def test_an_empty_post_is_none(self):
+        self.assertEqual(read_reply("Hi.\nPANTHEON[say]:   \n"), ([], "", "Hi."))
+
+    def test_report_lines(self):
+        text = report_lines("your check", ("go", "stop"))
+        self.assertIn("write your check as your report: the last message", text)
+        self.assertTrue(text.endswith("PANTHEON[status]: go\nPANTHEON[status]: stop"))
+
+
+class KeyTest(unittest.TestCase):
+    def test_a_key_pantheon_cannot_read_stays(self):
+        path = HOME / "key"
+        good = install_key()
+        try:
+            path.write_text("not a key\n")
+            with self.assertRaises(ValueError):
+                install_key()
+            self.assertEqual(path.read_text(), "not a key\n")
+            path.unlink()
+            made = install_key()
+            self.assertEqual(len(made), 32)
+            self.assertEqual(install_key(), made)
+        finally:
+            path.write_text(good.hex() + "\n")
+
+
+def gemini_screen(rows, width=80, above=(), below=()):
+    """A gemini screen as capture-pane shows it: the lines above, then a dialog in
+    gemini's round box, each row wrapped to fit as Ink wraps it, then the lines below
+    (gemini hides its input box under a dialog). A row that starts with "$ " is a
+    command, in a box of its own. Ink cuts the first line and the options to one line
+    with "…". Drawn from gemini 0.66's code, not taken from a live pane."""
+    inner = width - 4
+    out = [*above, "╭" + "─" * (width - 2) + "╮"]
+    for row in rows:
+        if row.startswith("$ "):
+            out.append("│ ╭" + "─" * (inner - 2) + "╮ │")
+            for part in textwrap.wrap(row[2:], inner - 4):
+                out.append("│ │ " + part.ljust(inner - 4) + " │ │")
+            out.append("│ ╰" + "─" * (inner - 2) + "╯ │")
+            continue
+        one_line = row.startswith("? ") or row[2:4] in ("1.", "2.", "3.")
+        if one_line and len(row) > inner:
+            row = row[: inner - 1] + "…"
+        for part in textwrap.wrap(row, inner) or [""]:
+            out.append("│ " + part.ljust(inner) + " │")
+    out += ["╰" + "─" * (width - 2) + "╯", *below]
+    return "\n".join(out)
+
+
+def side_by_side(left, right, width=80):
+    """Two warnings as gemini draws them: in one row, each wrapped to half of it."""
+    half = (width - 4) // 2
+    cols = [
+        [p for r in w for p in textwrap.wrap(r, half) or [""]] for w in (left, right)
+    ]
+    n = max(map(len, cols))
+    left, right = (c + [""] * (n - len(c)) for c in cols)
+    return [a.ljust(half) + b for a, b in zip(left, right)]
+
+
+FLAGS_WARNING = [
+    "⚠  ⚠️ CRITICAL SECURITY WARNING: Untrusted Command Flags Detected",
+    "   The following flags/arguments were sourced from external untrusted input "
+    "(e.g., Buganizer ticket, external document):",
+    "     • /Users/me/notes.md",
+    "   Executing commands with flags sourced from untrusted input can execute "
+    "arbitrary code on your machine.",
+    "   Carefully verify these flags before approving.",
+]
+BUILD_WARNING = [
+    "⚠  ⚠️ CAUTION: Build Configuration Was Recently Modified",
+    "   Build file(s) (package.json) were modified earlier in this session. Running "
+    "'npm' will execute the updated build definitions.",
+    "   Ensure you trust all modifications made to build files before approving "
+    "execution.",
+]
+EXEC_OPTIONS = ["● 1. Allow once", "  2. No, suggest changes (esc)"]
+ASK_DIALOG = ["? Ask User", "Which branch?", "", "● 1. main", "  2. dev"]
+INPUT_BOX = " >   Type your message or @path/to/file"
+
+
+def exec_dialog(command, warnings, counter=""):
+    header = f"? Shell  {command}" + (f"    {counter}" if counter else "")
+    question = ["", "Allow execution of [Shell]?", ""]
+    return [header, f"$ {command}", "", *warnings, *question, *EXEC_OPTIONS]
+
+
+class GeminiDialogTest(unittest.TestCase):
+    def held(self, rows, **kw):
+        return held_dialog(gemini_screen(rows, **kw))
+
+    def test_untrusted_flags(self):
+        text = self.held(exec_dialog("cat /Users/me/notes.md", FLAGS_WARNING))
+        self.assertTrue(text.startswith("?Shellcat/Users/me/notes.md"), text)
+        self.assertTrue(text.endswith("●1.Allowonce2.No,suggestchanges(esc)"), text)
+
+    def test_a_build_command_after_a_build_file_changed(self):
+        self.assertTrue(self.held(exec_dialog("npm test", BUILD_WARNING)))
+
+    def test_two_warnings_side_by_side(self):
+        rows = side_by_side(FLAGS_WARNING, BUILD_WARNING)
+        self.assertTrue(any("CRITICAL" in r and "CAUTION:" in r for r in rows))
+        self.assertTrue(self.held(exec_dialog("cd /w && npm test", rows)))
+
+    def test_a_change_to_a_build_file(self):
+        rows = [
+            '? Edit  package.json: "test": "jest" => "test": "vitest"',
+            '$ 12 -   "test": "jest" 12 +   "test": "vitest"',
+            "",
+            "⚠  ⚠️ CRITICAL SECURITY WARNING: Build File Modification",
+            "   Target: package.json",
+            "   Modifying build configuration files can introduce malicious rules, "
+            "test runners, or dependency hooks that execute arbitrary code during "
+            "subsequent commands (e.g., blaze test, npm test, make).",
+            "   Inspect every line of the change below carefully before approving.",
+            "",
+            "Apply this change?",
+            "",
+            "● 1. Allow once",
+            "  2. Modify with external editor",
+            "  3. No, suggest changes (esc)",
+        ]
+        self.assertTrue(self.held(rows).startswith("?Editpackage.json"))
+
+    def test_a_narrow_pane(self):
+        rows = exec_dialog("cat /Users/me/notes.md", FLAGS_WARNING)
+        screen = gemini_screen(rows, width=40)  # pantheon's narrowest
+        self.assertNotIn("WARNING: Untrusted", screen)  # the heading wraps
+        self.assertTrue(held_dialog(screen))
+        # Narrower, gemini cuts the options short, and the dialog needs you.
+        self.assertEqual(self.held(rows, width=33), "")
+
+    def test_with_another_option_chosen(self):
+        rows = exec_dialog("cat /Users/me/notes.md", FLAGS_WARNING)
+        rows[-2:] = ["  1. Allow once", "● 2. No, suggest changes (esc)"]
+        self.assertTrue(self.held(rows))
+
+    def test_the_text_tells_dialogs_apart(self):
+        one = self.held(exec_dialog("cat /a.md", FLAGS_WARNING, "1 of 2"))
+        two = self.held(exec_dialog("cat /a.md", FLAGS_WARNING, "2 of 2"))
+        other = self.held(exec_dialog("cat /b.md", FLAGS_WARNING))
+        self.assertEqual(len({one, two, other}), 3)
+        # Nor the pane's width, which a resize changes while it waits, unless the
+        # resize cuts its first line.
+        rows = exec_dialog("cat /a.md", FLAGS_WARNING, "1 of 2")
+        self.assertEqual(self.held(rows, width=120), one)
+
+    def test_other_dialogs_are_not_held(self):
+        plain = exec_dialog("ls -la", [])
+        plain[-2:] = [
+            "● 1. Allow once",
+            "  2. Allow for this session",
+            "  3. No, suggest changes (esc)",
+        ]
+        self.assertEqual(self.held(plain), "")  # from an ask rule of your own
+        self.assertEqual(self.held(exec_dialog("ls -la", [])), "")  # untrusted folder
+        url = ["⚠  **Warning:** Deceptive URL(s) detected:", "   https://example.com"]
+        self.assertEqual(self.held(exec_dialog("curl https://example.com", url)), "")
+        self.assertEqual(self.held(ASK_DIALOG), "")
+        self.assertEqual(held_dialog(INPUT_BOX), "")
+
+    def test_only_the_live_dialog_counts(self):
+        quoted = gemini_screen(exec_dialog("cat /a.md", FLAGS_WARNING)).splitlines()
+        self.assertEqual(self.held(ASK_DIALOG, above=quoted), "")
+        answer = ["Answer Questions", "Which branch?", "> Enter your response"]
+        self.assertEqual(self.held(answer, above=quoted), "")
+        # Or no dialog at all, as for a shell that waits for input.
+        self.assertEqual(held_dialog("\n".join([*quoted, INPUT_BOX])), "")
+        # Words that a command quotes are in its box, not in a warning.
+        quote = "echo 'Untrusted CAUTION: Modification'"
+        self.assertEqual(self.held(exec_dialog(quote, [])), "")
+        # A notice that gemini shows below a dialog is fine.
+        below = ["", "  Gemini CLI update available! 0.66.0 → 0.67.0"]
+        rows = exec_dialog("cat /a.md", FLAGS_WARNING)
+        self.assertTrue(self.held(rows, below=below))
+
+    def test_the_input_box_shows_yolo(self):
+        box = "│ {} Type your message or @path/to/file │"
+        self.assertTrue(gemini_yolo(box.format("*")))
+        self.assertFalse(gemini_yolo(box.format(">")))
+        self.assertIsNone(gemini_yolo(box.format("!")))  # its shell mode
+        self.assertIsNone(gemini_yolo("● 1. Allow once"))  # a dialog hides the box
+        self.assertFalse(gemini_yolo(box.format("*") + "\n" + box.format(">")))
+
+
+class RoomTest(unittest.TestCase):
+    def test_every_header_lines_up(self):
+        """A long entry's header comes after its ▶. A short entry's, and that of a line
+        with buttons, start in the same column, as does a long entry's body."""
+        head = Content("10:42 builder-claude ")
+        short, long, action = (
+            long_entry(head, ""),
+            long_entry(head, "the body"),
+            ActionEntry(head, [("Transport", lambda: None)], True),
+        )
+
+        class RoomApp(App):
+            def compose(self):
+                yield Room(short, long, action)
+
+        async def columns():
+            async with RoomApp().run_test() as pilot:
+                await pilot.pause()
+                title = long.query_one("CollapsibleTitle")
+                return [
+                    short.content_region.x,
+                    title.content_region.x + str(title.render()).index("10:42"),
+                    long.query_one(Preview).content_region.x,
+                    action.query_one(Static).content_region.x,
+                ]
+
+        columns = asyncio.run(columns())
+        self.assertEqual(len(set(columns)), 1, columns)
+
+
+def gemini_chat(native_id, records):
+    """A chat file as gemini keeps one for a session, in the tests' gemini home: its
+    first line, then a line for each record."""
+    folder = gemini_home() / "tmp" / "project" / "chats"
+    folder.mkdir(parents=True, exist_ok=True)
+    lines = [{"sessionId": native_id, "kind": "main"}, *records]
+    path = folder / f"session-2026-11-02T10-00-{native_id[:8]}.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in lines))
+
+
+class GeminiChatTest(unittest.TestCase):
+    def test_the_last_message_of_the_turn(self):
+        gemini_chat(
+            "aaaaaaaa-1",
+            [
+                {"id": "1", "type": "user", "content": [{"text": "Your turn."}]},
+                {"id": "2", "type": "gemini", "content": "Let me look.", "model": "m"},
+                {"id": "3", "type": "user", "content": [{"text": "tool output"}]},
+                {"id": "4", "type": "gemini", "content": "Done.", "model": "m-2"},
+                {"$set": {"lastUpdated": "2026-11-02T10:01:00Z"}},
+                {"id": "5", "type": "info", "content": "a note of gemini's own"},
+            ],
+        )
+        self.assertEqual(gemini_turn("aaaaaaaa-1"), ("m-2", "Done."))
+
+    def test_a_turn_with_no_message(self):
+        gemini_chat(
+            "bbbbbbbb-1",
+            [
+                {"id": "1", "type": "gemini", "content": "Old news.", "model": "m"},
+                {"id": "2", "type": "user", "content": [{"text": "Your turn."}]},
+                {"id": "3", "type": "gemini", "content": "", "model": "auto-x"},
+            ],
+        )
+        self.assertEqual(gemini_turn("bbbbbbbb-1"), ("m", ""))
+        # Nor does the last turn's message count for a turn that failed before one.
+        gemini_chat(
+            "dddddddd-1",
+            [
+                {"id": "1", "type": "gemini", "content": "Old news.", "model": "m"},
+                {"id": "2", "type": "user", "content": [{"text": "Your turn."}]},
+            ],
+        )
+        self.assertEqual(gemini_turn("dddddddd-1"), ("m", ""))
+        self.assertEqual(gemini_turn("cccccccc-1"), ("", ""))  # no chat file
+
+    def test_part_text(self):
+        parts = [{"text": "a"}, {"text": "thinking", "thought": True}, "b", {"x": 1}]
+        self.assertEqual(part_text(parts), "ab")
+        self.assertEqual(part_text({"text": "c"}), "c")
+        self.assertEqual(part_text(None), "")
+
+
+class SessionCase(unittest.TestCase):
+    """A session of MODE, which pantheon opens as it would any session."""
+
+    MODE, TASK, AGENTS, YOLO = "fake", "", "claude,codex", False
+
+    def setUp(self):
+        MODES.update(TEST_MODES)
+        every = dict.fromkeys(TOOLS, "")  # every tool can run: no PATH lookups
+        self.enterContext(mock.patch.object(MODULE, "tool_problems", lambda cfg: every))
+        self.dir = tempfile.mkdtemp(dir=HOME)
+        req = NewSession(self.MODE, self.TASK, self.dir, self.YOLO, agents=self.AGENTS)
+        slug, _ = prepare({}, req, lambda files, note: True)
+        self.s = Session(slug, {}, lambda: (80, 24))
+
+    def tearDown(self):
+        self.s.close()
+        for name in TEST_MODES:
+            del MODES[name]
+
+    def room(self, kind):
+        rows = self.s.db.execute("SELECT text FROM events WHERE kind = ?", (kind,))
+        return [r["text"] for r in rows]
+
+    def give(self, step):
+        """The step's turn as its agent has it: typed in, and under way."""
+        self.s.db.execute("UPDATE steps SET sent = 1 WHERE id = ?", (step["id"],))
+        a = self.s.agent_by_id(step["agent_id"])
+        a.outbox = [o for o in a.outbox if o.step_id != step["id"]]  # as typing does
+        self.s.save_agent(a, state="working")
+        return a
+
+    def end(self, step, status, text="Done."):
+        """The step's agent ends its turn with a last message: text, then status."""
+        a = self.give(step)
+        self.s.replied(a, f"{text}\nPANTHEON[status]: {status}")
+        self.s.turn_ended(a)
+
+    def advance(self):
+        """The turns the engine starts now, each as (stage, track, round, agent)."""
+        asyncio.run(self.s.advance())
+        rows = self.s.db.execute(
+            "SELECT * FROM steps WHERE status = 'open' ORDER BY id"
+        ).fetchall()
+        return rows, [
+            (r["stage"], r["track"], r["round"], self.s.agent_by_id(r["agent_id"]).name)
+            for r in rows
+        ]
+
+    def all_idle(self):
+        """Every agent in the plan, made and idle, so its turns wait in its outbox
+        rather than start it."""
+        for _, role, track, _ in self.s.team():
+            self.s.save_agent(self.s.agent_for(role, track), state="idle")
+
+
+class SessionTest(SessionCase):
+    def check_step(self):
+        return self.s.create_step("check", 0, 0, self.s.agent_for("checker", 0))
+
+    def test_the_check_prompt(self):
+        prompt = self.check_step()["prompt"]
+        self.assertIn(
+            "The plan goes on only if this is true: ok; else it ends here.", prompt
+        )
+        self.assertIn("PANTHEON[status]: go\nPANTHEON[status]: stop", prompt)
+        self.assertIn(PROMPTS["go"].format(go_if="ok"), prompt)
+        self.assertIn("- builder-codex (builder, track 2): codex", prompt)
+        self.assertIn(f"    {self.s.room_file}\n\nTo post to the room", prompt)
+        self.assertIn("\n\nPANTHEON[say]: your message\n\n", prompt)
+        self.assertEqual(self.room("prompt"), [prompt])
+
+    def test_a_stop_ends_the_session(self):
+        step = self.check_step()
+        # The record of a turn that ended with a stop.
+        self.s.db.execute(
+            "UPDATE steps SET status = 'stop' WHERE id = ?", (step["id"],)
+        )
+        self.s.save_agent(self.s.agents["checker-claude"], state="idle")
+        asyncio.run(self.s.advance())
+        self.assertEqual(self.s.state, "done")
+        done = (
+            "The plan stopped after check. Read why in the report by checker-claude. "
+            "The agents still run: post in the room (ctrl+s) to "
+            "give them more work. No turn came for builder-claude, builder-codex, "
+            "so they never started."
+        )
+        self.assertEqual(self.room("done"), [done])
+        count = self.s.db.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+        self.assertEqual(count, 1)  # the builders never got a row
+
+    def test_a_report(self):
+        step = self.check_step()
+        self.end(step, "go", "All clear.")
+        done = self.s.step(step["id"])
+        self.assertEqual((done["status"], done["report"]), ("go", "All clear."))
+        self.assertEqual(self.s.agents["checker-claude"].state, "idle")
+        self.assertEqual(self.room("report"), ["01-checker-claude.md"])
+        # In a file too, for the agents that take the next turns.
+        self.assertEqual(Path(self.s.report_path(done)).read_text(), "All clear.\n")
+
+    def test_the_room_file_has_each_report(self):
+        short, long = self.check_step(), self.check_step()
+        self.end(short, "go", "All clear.")
+        self.end(long, "stop", "Not clear.\nThe details.")
+        self.s.write_room()
+        text = Path(self.s.room_file).read_text()
+        self.assertIn("checker-claude reports [go]: All clear.\n#", text)  # all of it
+        # A longer one by its first line, and the file that holds all of it.
+        path = self.s.report_path(self.s.step(long["id"]))
+        last = f"checker-claude reports [stop]: Not clear.\n    {path}\n"
+        self.assertTrue(text.endswith(last), text)
+
+    def test_a_turn_with_no_status_asks_you(self):
+        a = self.give(self.check_step())
+        self.s.replied(a, "All clear.")
+        self.s.turn_ended(a)
+        reason = "ended its turn with no PANTHEON[status]"
+        self.assertEqual((a.state, a.reason), ("needs_you", reason))
+        needs = self.s.db.execute("SELECT data FROM events WHERE kind = 'needs'")
+        self.assertTrue(json.loads(needs.fetchone()["data"])["remind"])
+        self.assertEqual(self.s.state, "needs_you")
+        # A status the step does not take, too; and the turn's message counts once.
+        for message in ("Done.\nPANTHEON[status]: done", None):
+            if message is not None:
+                self.s.replied(a, message)
+            self.s.turn_ended(a)
+        reason = "ended its turn with PANTHEON[status]: done, not go or stop"
+        self.assertEqual(
+            self.room("needs")[1:], [reason, "ended its turn with no PANTHEON[status]"]
+        )
+
+    def test_resume_gives_back_a_turn_cut_short(self):
+        step = self.check_step()
+        self.give(step)
+        self.s.all_exited()  # its tmux server went away, say
+        self.assertEqual(self.s.state, "stopped")
+        stop = self.s.db.execute("SELECT data FROM events WHERE kind = 'error'")
+        self.assertTrue(json.loads(stop.fetchone()["data"])["resume"])
+        self.assertEqual(self.s.asks(), 1)  # its Resume waits on you
+        self.s.resume()
+        self.assertEqual((self.s.state, self.s.asks()), ("running", 0))
+        self.assertIsNone(self.s.open_step())
+        retried = "check did not finish, so it gets that turn again, fresh."
+        self.assertIn(retried, self.room("note"))
+        steps = [
+            tuple(r)
+            for r in self.s.db.execute("SELECT stage, track, status FROM steps")
+        ]
+        self.assertEqual(plan_turns(FAKE, 2, steps), [("check", 0, 0, "checker")])
+
+    def test_an_exit_after_the_report_is_no_stop(self):
+        step = self.check_step()
+        a = self.give(step)
+        # Its Stop hook came just before the exit, and waits to be read.
+        stop = {"hook_event_name": "Stop", "last_assistant_message": FINE}
+        self.s.db.execute(
+            "INSERT INTO hooks (agent, payload) VALUES (?, ?)",
+            (a.name, json.dumps(stop)),
+        )
+        self.s.exited(a, "0")
+        self.assertEqual((self.s.state, a.state), ("running", "exited"))
+        self.assertEqual(self.s.step(step["id"])["status"], "go")
+
+    def test_an_exit_gives_back_a_turn_that_never_reached_it(self):
+        self.end(self.check_step(), "go")  # a report since its start: a start works
+        a = self.s.agents["checker-claude"]
+        later = self.s.create_step("check", 0, 0, a)  # still in its outbox
+        self.s.exited(a, "1")
+        self.assertIsNone(self.s.step(later["id"]))
+        given = "check never reached it, so it gets that turn again, fresh."
+        self.assertIn(given, self.room("note"))
+        self.assertEqual(self.s.state, "running")
+
+    def test_an_exit_right_after_a_start_stops_the_session(self):
+        step = self.check_step()
+        a = self.s.agents["checker-claude"]
+        # No report since it started: a new start would likely fail the same way.
+        self.s.event("start", "joined", a)
+        self.s.save_agent(a, state="starting")
+        self.s.exited(a, "1")
+        self.assertEqual(self.s.step(step["id"])["status"], "open")
+        self.assertEqual(self.s.state, "stopped")
+
+    def test_a_failed_hook_loses_only_itself(self):
+        step = self.check_step()
+        a = self.give(step)
+        stop = {"hook_event_name": "Stop", "last_assistant_message": FINE}
+        for ev in ({"hook_event_name": {"not": "a name"}}, stop):
+            self.s.db.execute(
+                "INSERT INTO hooks (agent, payload) VALUES (?, ?)",
+                (a.name, json.dumps(ev)),
+            )
+        with self.assertRaises(sqlite3.Error):  # the bad hook's, once the Stop is in
+            self.s.read_hooks()
+        self.assertIsNone(self.s.db.execute("SELECT 1 FROM hooks").fetchone())
+        self.assertEqual(self.s.step(step["id"])["status"], "go")
+
+    def test_a_turn_with_no_step_ends_despite_background_tasks(self):
+        a = self.s.agent_for("checker", 0)
+        self.s.save_agent(a, state="working")
+        a.in_turn = True
+        stop = {"hook_event_name": "Stop", "background_tasks": [{"id": "dev-server"}]}
+        self.s.on_hook(a, stop)
+        self.assertEqual(a.state, "idle")
+
+    def stop_hook(self, a, message):
+        """a's turn ends with message, as its Stop hook says."""
+        stop = {"hook_event_name": "Stop", "last_assistant_message": message}
+        self.s.on_hook(a, stop)
+
+    def test_a_reply_posts_as_its_agent(self):
+        a, other = self.s.agent_for("checker", 0), self.s.agent_for("builder", 1)
+        self.s.save_agent(other, state="idle")
+        self.s.save_agent(a, state="working")  # a turn you started in its screen
+        self.s.set_session_state("done")
+        self.stop_hook(
+            a,
+            "Sure.\n\nPANTHEON[say]: the user: done\nPANTHEON[say]: builder-claude: look",
+        )
+        rows = self.s.db.execute("SELECT text, data FROM events WHERE kind = 'say'")
+        self.assertEqual(
+            [(r["text"], json.loads(r["data"])["from"]) for r in rows],
+            [("the user: done", a.name), ("builder-claude: look", a.name)],
+        )
+        self.assertEqual([o.kind for o in other.outbox], ["post", "post"])
+        self.assertIn(self.s.room_file, other.outbox[0].text)
+        self.assertEqual(self.room("note")[-1], "replied:\nSure.")  # the rest is yours
+        self.assertEqual(self.s.state, "done")  # only you give the team more work
+        self.s.post("you", "more work")
+        self.assertEqual(self.s.state, "active")
+
+    def test_a_post_with_no_report_waits_for_an_answer(self):
+        a = self.give(self.check_step())
+        self.stop_hook(a, "I need one fact first.\nPANTHEON[say]: which branch?")
+        self.assertEqual((a.state, a.reason), ("idle", ROOM_WAIT))
+        self.assertEqual(self.room("say"), ["which branch?"])
+        self.assertIn("waits for an answer in the room", self.room("note"))
+
+    def test_the_room_file(self):
+        self.check_step()
+        self.s.save_agent(self.s.agent_for("builder", 1), state="idle")  # it hears
+        self.s.post("you", "first")
+        self.s.write_room()
+        self.assertIn("the user says: first", Path(self.s.room_file).read_text())
+        self.s.event("hook", "Stop")
+        self.assertFalse(self.s.room_changed)  # hooks are not in the room
+        self.s.post("you", "x" * ROOM_CHARS)
+        self.assertTrue(self.s.room_changed)
+        self.s.write_room()
+        cut, _, rest = Path(self.s.room_file).read_text().partition("\n")
+        self.assertRegex(cut, r"^\(\d+ older entries left out, to keep this short\)$")
+        self.assertTrue(rest.endswith("x …\n"))  # an entry too long on its own
+        self.assertEqual(len(rest), ROOM_CHARS + 1)
+
+    def test_a_late_launch_gets_the_posts_it_missed(self):
+        self.s.post("you", "before the prompt")
+        step = self.check_step()
+        self.s.post("you", "after the prompt")
+        a = self.s.agents["checker-claude"]
+        # What launch does once tmux has the agent, with a prompt too long for argv.
+        first = Outgoing(step["prompt"], "step", step["id"])
+        self.s.started(a, first, False, "/bin/claude")
+        self.assertEqual([o.kind for o in a.outbox], ["step", "post"])
+        self.assertIn("after the prompt", a.outbox[1].text)
+        self.assertIn("- the user: before the prompt", step["prompt"])
+        # A reopen, even of a stopped session, keeps that order.
+        self.s.set_session_state("stopped")
+        again = Session(self.s.slug, {}, lambda: (80, 24))
+        try:
+            outbox = again.agents["checker-claude"].outbox
+            self.assertEqual([o.kind for o in outbox], ["step", "post"])
+            self.assertIn("after the prompt", outbox[1].text)
+        finally:
+            again.close()
+
+    def test_a_first_prompt_in_argv_is_sent(self):
+        step = self.check_step()
+        self.s.post("you", "after the prompt")
+        a = self.s.agents["checker-claude"]
+        self.s.started(a, Outgoing(step["prompt"], "step", step["id"]), True, "/x")
+        self.assertEqual(self.s.step(step["id"])["sent"], 1)
+        self.assertEqual([o.kind for o in a.outbox], ["post"])
+
+    def test_a_failed_start_leaves_no_file(self):
+        key, before = HOME / "key", set(SESSIONS.iterdir())
+        good = key.read_text()
+        try:
+            key.write_text("not a key\n")  # the session row cannot be signed
+            req = NewSession("fake", "", self.dir, False, agents="claude")
+            with self.assertRaises(ValueError):
+                prepare({}, req, lambda files, note: True)
+        finally:
+            key.write_text(good)
+        self.assertEqual(set(SESSIONS.iterdir()), before)
+
+    def test_a_remote_ollama_needs_your_yes_at_launch_too(self):
+        cfg = {"ollama_url": "http://10.0.0.5:11434"}
+        self.assertIn("is not on this machine", ollama_problem(cfg))
+        self.assertEqual(ollama_problem({**cfg, "ollama_remote": True}), "")
+        self.assertEqual(ollama_problem({"ollama_url": "http://localhost:1"}), "")
+        a = self.s.agent_for("checker", 0)
+        self.s.cfg = cfg  # as a reopen with another config would have it
+        # Its own error, not one from a later step, such as no claude on PATH.
+        with self.assertRaisesRegex(OSError, "is not on this machine"):
+            launch_ollama(self.s, a)
+
+    def test_a_failed_launch_waits_on_you(self):
+        self.assertEqual(self.s.asks(), 0)
+        self.s.launch_failed.add("checker-claude")  # as launch records it
+        self.assertEqual(self.s.asks(), 1)
+
+    def test_a_one_shot_session(self):
+        self.assertFalse(self.s.stop_when_done)
+        req = NewSession("fake", "", self.dir, False, "claude", stop_when_done=True)
+        slug, _ = prepare({}, req, lambda files, note: True)
+        s = Session(slug, {}, lambda: (80, 24))
+        try:
+            self.assertTrue(s.stop_when_done)  # a reopen keeps it, from the file
+            opening = s.db.execute("SELECT text FROM events ORDER BY id").fetchone()
+            stops = "; the agents stop once the plan is done."
+            self.assertTrue(opening["text"].endswith(stops), opening["text"])
+        finally:
+            s.close()
+
+    def test_resolve_roster(self):
+        roster, picks, _ = resolve_roster({}, "develop", "", ["developer=codex"])
+        self.assertEqual([r[0] for r in roster if r[4]], ["claude", "codex", "gemini"])
+        self.assertEqual(picks, {"developer": "codex"})
+        with self.assertRaises(PrepError):
+            resolve_roster({}, "develop", "", ["reviewer=codex"])
+        with self.assertRaises(PrepError):  # codex has no such effort
+            resolve_roster({}, "develop", "codex@huge", [])
+        _, _, notes = resolve_roster({}, "develop", "gemini@high", [])
+        ignored = "gemini takes effort only through its model, so @high is ignored"
+        self.assertIn(ignored, notes)
+
+    def test_a_mode_takes_every_tool_that_can_run(self):
+        # Here every tool can run (setUp), but ollama only with a model.
+        for mode in ("bakeoff", "develop"):
+            roster, _, notes = resolve_roster({}, mode, "", [])
+            self.assertEqual([r[1] for r in roster], ["claude", "codex", "gemini"])
+            self.assertIn("ollama: no ollama_model is set", notes[0])
+        cfg = {"ollama_model": "qwen3:8b"}
+        roster, _, _ = resolve_roster(cfg, "bakeoff", "", [])
+        self.assertEqual(roster[-1][1:3], ("ollama", "qwen3:8b"))
+        roster, _, _ = resolve_roster(cfg, "hello", "", [])
+        self.assertEqual(len(roster), 2)  # its own count
+
+
+class TestCommandTest(SessionCase):
+    """pantheon test: its scenarios and their options, and the repo a scenario starts
+    in; not a scenario's session, whose agents would start."""
+
+    def test_its_options(self):
+        parser, _ = build_parser()
+        args = parser.parse_args(
+            ["test", "fizzbuzz", "develop", "-a", "2", "--stop-when-done"]
+        )
+        self.assertEqual(
+            (args.scenario, args.mode, args.agents, args.stop_when_done),
+            ("fizzbuzz", "develop", "2", True),
+        )
+        args = parser.parse_args(["test", "unit", "-v", "-k", "Reply"])
+        self.assertEqual(
+            (args.scenario, args.verbose, args.patterns), ("unit", True, ["Reply"])
+        )
+        # A scenario comes first, and has its own task.
+        for wrong in (["test", "develop"], ["test", "odd_or_even", "develop", "x"]):
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(wrong)
+        args = parser.parse_args(["start", "develop", "Add a flag."])  # as before
+        self.assertEqual((args.dir, args.task), (".", ["Add a flag."]))
+
+    def test_its_repo(self):
+        tempfile.tempdir, before = str(HOME), tempfile.tempdir
+        try:
+            repo = scenario_repo()
+        finally:
+            tempfile.tempdir = before
+        self.assertEqual(git(repo, "log", "--format=%an: %s")[1], "pantheon: Start.\n")
+        self.assertEqual(git(repo, "ls-files")[1], "")  # empty
+        self.assertEqual(dirty_files(repo), [])
+        for name, task in SCENARIOS.items():
+            for mode in ("bakeoff", "develop"):  # both need a git repo, and a task
+                req = NewSession(mode, task, repo, False, "claude,codex")
+                slug, _ = prepare({}, req, lambda files, note: self.fail(files))
+                db = connect(db_path(slug))
+                saved = db.execute("SELECT task FROM session").fetchone()["task"]
+                db.close()
+                self.assertEqual(saved, task, name)
+
+
+class DevelopTest(SessionCase):
+    MODE, TASK = "develop-test", "Add a flag."
+
+    def test_the_team_has_no_tracks(self):
+        a = self.s.agent_for("reviewer", 2)
+        intro = "\n".join(self.s.intro(a))
+        self.assertIn("- developer-claude (developer): claude\n", intro)
+        self.assertIn("- reviewer-codex (reviewer): codex (that is you)", intro)
+
+    def test_a_fresh_reviewer_starts_again_for_each_turn(self):
+        reviewer, developer = (
+            self.s.agent_for("reviewer", 1),
+            self.s.agent_for("developer", 0),
+        )
+        self.assertFalse(self.s.renews(reviewer))  # new: its first turn starts it
+        for a in (reviewer, developer):
+            self.s.save_agent(a, state="idle")
+            a.generation = 1  # it started once
+        self.assertTrue(self.s.renews(reviewer))
+        self.assertFalse(self.s.renews(developer))  # not fresh: it keeps its context
+        reviewer.generation = 0  # never started, like the session tests' idle agents
+        self.assertFalse(self.s.renews(reviewer))
+
+    def test_a_new_generation(self):
+        a = self.s.agent_for("reviewer", 1)
+        self.s.save_agent(a, state="idle")
+        a.generation, a.ran = 2, ("gpt-9", "high")  # it started twice, and said so
+        hook = {"hook_event_name": "Stop"}  # one its last run left
+        self.s.db.execute(
+            "INSERT INTO hooks (agent, payload) VALUES (?, ?)",
+            (a.name, json.dumps(hook)),
+        )
+        fresh = self.s.renew(a)
+        self.assertIs(self.s.agents[a.name], fresh)
+        self.assertEqual((fresh.id, fresh.state, fresh.generation), (a.id, "new", 2))
+        self.assertEqual(fresh.ran, ("gpt-9", "high"))  # not named again in the room
+        self.assertIsNone(self.s.db.execute("SELECT 1 FROM hooks").fetchone())
+        note = "starts again, fresh, for its next turn: generation 3"
+        self.assertIn(note, self.room("note"))
+        prompt = self.s.create_step("build", 1, 2, fresh)["prompt"]
+        self.assertIn(
+            "You are generation 3 of reviewer-claude: you start fresh", prompt
+        )
+        self.assertIn("The task:\n\nAdd a flag.", prompt)  # a whole first prompt
+        # Its tab names the generation once it runs: the same instance, a new agent.
+        fresh.generation = 3
+        self.assertEqual(tab_label(fresh).plain, "· reviewer-claude (3)")
+        self.assertEqual(
+            tab_label(self.s.agent_for("reviewer", 2)).plain, "· reviewer-codex"
+        )
+
+    def test_a_reopen_counts_the_generations(self):
+        a = self.s.agent_for("reviewer", 1)
+        for _ in range(2):
+            self.s.event("start", "joined", a)
+        self.s.save_agent(a, state="idle")
+        again = Session(self.s.slug, {}, lambda: (80, 24))
+        try:
+            self.assertEqual(again.agents[a.name].generation, 2)
+        finally:
+            again.close()
+
+    def test_an_old_runs_hooks_are_not_a_new_ones(self):
+        a = self.s.agent_for("reviewer", 1)  # new: no process of its own runs
+        self.s.on_hook(a, {"hook_event_name": "SessionStart"})
+        self.assertEqual((a.hooked, a.state), (False, "new"))
+        # A reopen may count them, from before its last start; its next start does not.
+        a.hooked = True
+        step = self.s.create_step("build", 1, 1, a)
+        self.s.started(a, Outgoing(step["prompt"], "step", step["id"]), False, "/x")
+        self.assertFalse(a.hooked)
+        self.assertFalse(self.s.can_type(a, a.outbox[0]))  # until a hook of its own
+
+    def test_fresh_reviewers_wait_until_they_are_free(self):
+        self.all_idle()
+        for _ in range(3):  # the developer's round 1, the reviewers', then its round 2
+            rows, _ = self.advance()
+            for row in rows:
+                self.end(row, "continue")
+        claude, codex = (
+            self.s.agents["reviewer-claude"],
+            self.s.agents["reviewer-codex"],
+        )
+        for a in (claude, codex):
+            a.generation = 1  # they ran, so each would start again for its next turn
+        self.s.tmux = None  # a restart would need tmux: none may come
+        self.s.save_agent(claude, state="working")  # it answers a post
+        self.s.attached = codex.name  # you are in its screen
+        self.assertEqual(self.advance()[1], [])
+        self.s.attached = ""
+        codex.outbox.append(Outgoing("Room post #1 ...", "post", event_id=1))
+        self.assertEqual(self.advance()[1], [])  # one is on its way to it
+
+    def test_the_help_names_fresh_agents(self):
+        text = mode_description(DEVELOP)
+        self.assertIn(
+            "reviewer   one for each tool, started again, fresh, for each", text
+        )
+        self.assertIn("developer  one\n", text)
+
+    def test_a_run(self):
+        self.all_idle()
+        rows, turns = self.advance()
+        self.assertEqual(turns, [("build", 0, 1, "developer-claude")])
+        self.assertIn(
+            "Write halt if this is now true: the reviewers", rows[0]["prompt"]
+        )
+        self.end(rows[0], "continue")
+        rows, turns = self.advance()
+        reviewers = [
+            ("build", 1, 1, "reviewer-claude"),
+            ("build", 2, 1, "reviewer-codex"),
+        ]
+        self.assertEqual(turns, reviewers)
+        prompt = rows[1]["prompt"]
+        self.assertIn("Your turn: build round 1. The developer builds", prompt)
+        self.assertIn(
+            "It is your turn since developer-claude's report came in: ", prompt
+        )
+        self.assertIn("Every reviewer takes this turn at once", prompt)
+        self.end(rows[1], "continue")  # the last made, but not the last one in
+        self.end(rows[0], "halt")
+        rows, turns = self.advance()
+        self.assertEqual(turns, [("build", 0, 2, "developer-claude")])
+        prompt = rows[0]["prompt"]
+        # Its turn came from every review, so it names them all.
+        self.assertIn("It is your turn since all of these came in:", prompt)
+        self.assertRegex(
+            prompt, r"- reviewer-claude: \S+/02-reviewer-claude-1.md \(halt\)"
+        )
+        self.assertRegex(
+            prompt, r"- reviewer-codex: \S+/03-reviewer-codex-1.md \(continue\)"
+        )
+        self.assertIn("- build round 1, by reviewer-claude:", prompt)
+        self.assertIn("- build round 1, by reviewer-codex:", prompt)
+        self.end(rows[0], "continue")
+        rows, _ = self.advance()
+        for row in rows:
+            self.end(row, "halt")
+        halted = "build: reviewer-claude, reviewer-codex halted it in round 2."
+        self.assertIn(halted, self.room("note"))
+        _, turns = self.advance()
+        self.assertEqual((turns, self.s.state), ([], "done"))
+        done = self.room("done")[0]
+        last = "by developer-claude, reviewer-claude, reviewer-codex."
+        self.assertTrue(
+            done.startswith(f"The plan is done. Read its last reports, {last}")
+        )
+
+    def test_a_run_out_of_rounds(self):
+        self.all_idle()
+        for _ in range(5 * 2):  # each round: the developer's turn, then the reviewers'
+            rows, _ = self.advance()
+            for row in rows:
+                self.end(row, "continue")
+        self.assertIn(
+            "build: it ran out of rounds (5), and no one halted it.", self.room("note")
+        )
+        self.advance()
+        self.assertEqual(self.s.state, "done")
+
+
+class BakeoffTest(SessionCase):
+    MODE, TASK = "bakeoff-test", "Add a flag."
+
+    def test_a_run(self):
+        self.all_idle()
+        rows, turns = self.advance()
+        self.assertEqual(turns, [("check", 0, 0, "chief-architect-claude")])
+        self.end(rows[0], "go")
+        rows, turns = self.advance()
+        self.assertEqual([t[:2] for t in turns], [("design", 1), ("design", 2)])
+        for row in rows:
+            self.end(row, "done")
+        for status in ("continue", "halt"):  # each track's build, in one round
+            rows, _ = self.advance()
+            for row in rows:
+                self.end(row, status)
+        rows, turns = self.advance()
+        self.assertEqual(turns, [("compare", 0, 0, "chief-architect-claude")])
+        prompt = rows[0]["prompt"]
+        lines = (f"PANTHEON[status]: {s}" for s in ("track-1", "track-2", "stop"))
+        self.assertIn("\n".join(lines), prompt)
+        self.assertIn("Write track-N for the track with the build to keep", prompt)
+        for t in (1, 2):  # how each track's build ended, for the pick
+            self.assertIn(f"- build, track {t}: reviewer-", prompt)
+        self.end(rows[0], "track-2")
+        rows, turns = self.advance()
+        self.assertEqual(turns, [("refine", 0, 0, "chief-architect-claude")])
+        self.end(rows[0], "done")
+        rows, turns = self.advance()
+        self.assertEqual(turns, [("finish", 2, 1, "developer-codex")])
+        prompt = rows[0]["prompt"]
+        self.assertIn("Your turn: finish round 1, track 2.", prompt)
+        self.assertIn("- refine, by chief-architect-claude:", prompt)
+        # The other tracks' work too, which refine says what to take from.
+        self.assertIn("- design, track 1, by architect-claude:", prompt)
+        self.assertIn("- build round 1, track 1, by developer-claude:", prompt)
+        self.assertIn("with the chief architect's changes", prompt)  # its own halt
+        self.end(rows[0], "continue")
+        rows, turns = self.advance()
+        self.assertEqual(turns, [("finish", 2, 1, "reviewer-codex")])
+        self.end(rows[0], "halt")
+        self.assertIn(
+            "finish, track 2: reviewer-codex halted it in round 1.", self.room("note")
+        )
+        _, turns = self.advance()
+        self.assertEqual((turns, self.s.state), ([], "done"))
+        # The developer's summary too: it has the build's branch, and how to check it.
+        self.assertTrue(
+            self.room("done")[0].startswith(
+                "The plan is done. Read its last reports, by developer-codex, "
+                "reviewer-codex."
+            )
+        )
+
+    def test_no_pick_ends_the_plan(self):
+        self.all_idle()
+        for status in ("go", "done", "continue", "halt"):
+            rows, _ = self.advance()
+            for row in rows:
+                self.end(row, status)
+        rows, _ = self.advance()
+        self.end(rows[0], "stop")
+        self.advance()
+        self.assertEqual(self.s.state, "done")
+        self.assertTrue(
+            self.room("done")[0].startswith("The plan stopped after compare.")
+        )
+
+
+class GeminiYoloTest(SessionCase):
+    """A gemini agent in a yolo session, mid-turn, whose input box showed yolo. Not
+    poll_panes or gemini_asks, which need tmux."""
+
+    AGENTS, YOLO = "gemini", True
+    HAND = "✋  Action Required (x)"
+
+    def setUp(self):
+        super().setUp()
+        self.a = self.s.agent_for("checker", 0)
+        self.s.save_agent(self.a, state="working")
+        self.a.saw_work = True  # so no title starts a turn
+        self.a.may_answer = True
+        self.held = held_dialog(gemini_screen(exec_dialog("cat /a.md", FLAGS_WARNING)))
+
+    def notes(self):
+        return [t for t in self.room("note") if t == PROMPTS["held"]]
+
+    def test_one_allow_for_each_dialog(self):
+        self.assertTrue(self.s.allow_held(self.a, self.held, 100))
+        self.assertFalse(self.s.allow_held(self.a, self.held, 100.5))  # its old screen
+        self.assertEqual(self.a.state, "working")
+        self.assertEqual(len(self.notes()), 1)
+
+    def test_one_note_for_each_run(self):
+        other = held_dialog(gemini_screen(exec_dialog("cat /b.md", FLAGS_WARNING)))
+        self.assertTrue(self.s.allow_held(self.a, self.held, 100))
+        self.assertTrue(self.s.allow_held(self.a, other, 100.5))
+        self.assertEqual(len(self.notes()), 1)
+        self.s.event("start", "", self.a)  # it starts again
+        self.assertTrue(self.s.allow_held(self.a, self.held, 101))
+        self.assertEqual(len(self.notes()), 2)
+
+    def test_never_while_you_are_in_its_screen(self):
+        self.s.attached = self.a.name
+        self.assertFalse(self.s.allow_held(self.a, self.held, 100))
+        self.assertEqual((self.a.state, self.a.reason), ("needs_you", GEMINI_ASKS))
+
+    def test_never_unless_its_input_box_showed_yolo(self):
+        for seen in (None, False):  # not seen since it started or you were in; or not
+            self.a.may_answer = seen
+            self.s.save_agent(self.a, state="working")
+            self.assertFalse(self.s.allow_held(self.a, self.held, 100))
+            self.assertEqual(self.a.state, "needs_you")  # at once, with no wait
+
+    def test_a_dialog_that_needs_you_stays_so(self):
+        self.s.needs_you(self.a, GEMINI_ASKS)
+        self.s.on_title(self.a, self.HAND)  # as after a reopen
+        self.assertEqual(
+            (self.a.state, self.room("needs")), ("needs_you", [GEMINI_ASKS])
+        )
+
+    def test_a_dialog_that_stays_needs_you(self):
+        self.assertTrue(self.s.allow_held(self.a, self.held, 100))
+        self.assertFalse(self.s.allow_held(self.a, self.held, 100 + DIALOG_WAIT))
+        self.assertEqual((self.a.state, self.a.reason), ("needs_you", GEMINI_ASKS))
+        self.assertEqual(self.s.state, "needs_you")
+
+    def test_any_other_dialog_needs_you_after_the_wait(self):
+        self.assertFalse(self.s.allow_held(self.a, "", 100))
+        self.assertEqual((self.a.state, self.room("needs")), ("working", []))
+        self.assertFalse(self.s.allow_held(self.a, "", 100 + DIALOG_WAIT))
+        self.assertEqual((self.a.state, self.a.reason), ("needs_you", GEMINI_ASKS))
+        needs = self.s.db.execute("SELECT data FROM events WHERE kind = 'needs'")
+        self.assertFalse(json.loads(needs.fetchone()["data"])["typeable"])
+        # A held dialog that shows later is still answered, and the wait ends.
+        self.assertTrue(self.s.allow_held(self.a, self.held, 103))
+        self.assertEqual((self.a.state, self.s.state), ("working", "running"))
+
+    def test_a_new_title_is_a_new_dialog(self):
+        self.assertTrue(self.s.allow_held(self.a, self.held, 100))
+        self.s.on_title(self.a, "✦  Working… (x)")
+        self.assertEqual((self.a.asked, self.a.allowed), (0.0, ""))
+        self.s.on_title(self.a, self.HAND)
+        self.assertEqual(self.a.state, "working")  # pantheon looks first
+        self.assertTrue(self.s.allow_held(self.a, self.held, 101))
+
+
+class GeminiNoYoloTest(SessionCase):
+    AGENTS = "gemini"
+
+    def setUp(self):
+        super().setUp()
+        self.a = self.s.agent_for("checker", 0)
+        self.s.save_agent(self.a, state="working", native_id="eeeeeeee-1")
+        self.a.saw_work = True  # mid-turn
+
+    def test_a_hand_title_needs_you_at_once(self):
+        self.s.on_title(self.a, GeminiYoloTest.HAND)
+        self.assertEqual((self.a.state, self.a.reason), ("needs_you", GEMINI_ASKS))
+        self.assertEqual(self.room("needs"), [GEMINI_ASKS])
+
+    def test_its_chat_file_has_its_posts(self):
+        gemini_chat(
+            "eeeeeeee-1",
+            [
+                {"id": "1", "type": "user", "content": [{"text": "Hi."}]},
+                {"id": "2", "type": "gemini", "content": "Hi.\nPANTHEON[say]: hi all"},
+            ],
+        )
+        self.s.on_title(self.a, "◇  Ready (x)")  # its turn ended
+        self.assertEqual(self.a.state, "idle")
+        self.assertEqual(self.room("say"), ["hi all"])
+        self.assertEqual(self.room("note")[-1], "replied:\nHi.")
+
+    def finish_check(self):
+        """Its check step, which its chat file says it finished."""
+        step = self.s.create_step("check", 0, 0, self.a)
+        self.give(step)
+        gemini_chat(
+            "eeeeeeee-1",
+            [
+                {"id": "1", "type": "user", "content": [{"text": "Your turn."}]},
+                {"id": "2", "type": "gemini", "content": FINE},
+            ],
+        )
+        return step
+
+    def test_its_chat_file_has_its_report(self):
+        step = self.finish_check()
+        self.s.on_title(self.a, "◇  Ready (x)")
+        done = self.s.step(step["id"])
+        self.assertEqual((done["status"], done["report"]), ("go", "Fine."))
+
+    def test_an_exit_before_its_title_still_ends_its_turn(self):
+        step = self.finish_check()
+        self.s.exited(self.a, "0")
+        self.assertEqual(self.s.step(step["id"])["status"], "go")
+        self.assertEqual(self.s.state, "running")
+
+
+class SwitcherTest(SessionCase):
+    """The session switcher, in an app with no screen, over a session no pantheon has
+    open. A delete stops no tmux server here: tests start none."""
+
+    def setUp(self):
+        super().setUp()
+        self.s.close()
+        self.enterContext(
+            mock.patch.object(MODULE, "stop_server_sync", lambda slug: None)
+        )
+
+    def press(self, *keys, open_sessions=None, deletes=False):
+        """Press keys in the switcher, on this test's session; give back the sessions
+        it lists then."""
+        slug = self.s.slug
+
+        class SwitcherApp(App):
+            def on_mount(self):
+                self.push_screen(SwitcherScreen(open_sessions or {}))
+
+        async def run():
+            app = SwitcherApp()
+            async with app.run_test() as pilot:
+                options = app.screen.query_one(OptionList)
+                options.highlighted = options.get_option_index(slug)
+                await pilot.press(*keys)
+                for _ in range(200 if deletes else 0):  # the delete runs in a thread
+                    await pilot.pause(0.01)
+                    if not db_path(slug).exists():
+                        break
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SwitcherScreen)
+                return [o.id for o in app.screen.query_one(OptionList).options]
+
+        return asyncio.run(run())
+
+    def test_d_deletes_a_session(self):
+        listed = self.press("d", "y", deletes=True)
+        self.assertNotIn(self.s.slug, listed)
+        self.assertFalse(db_path(self.s.slug).exists())
+        self.assertFalse(scratch_dir(self.s.slug).exists())
+
+    def test_no_keeps_it(self):
+        self.assertIn(self.s.slug, self.press("d", "n"))
+        self.assertTrue(db_path(self.s.slug).exists())
+
+    def test_a_session_open_here_stays(self):
+        listed = self.press("d", "y", open_sessions={self.s.slug: self.s})
+        self.assertIn(self.s.slug, listed)  # it asked nothing; y did nothing
+        self.assertTrue(db_path(self.s.slug).exists())
+
+
+# Session tests run these; the real modes, but with no git repo.
+TEST_MODES = {
+    "fake": FAKE,
+    "develop-test": replace(DEVELOP, needs_git=False),
+    "bakeoff-test": replace(BAKEOFF, needs_git=False),
+}
 
 
 # Installed copies look for these two lines before they update to a newer file.
