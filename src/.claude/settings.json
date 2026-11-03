@@ -11,10 +11,14 @@
       "WebSearch"
     ]
   },
+  "model": "opus",
   "effortLevel": "xhigh",
   "modelSettings": {
     "claude-opus-5-5": {
-      "effortLevel": "high"
+      "effortLevel": "xhigh"
+    },
+    "claude-fable-5-1": {
+      "effortLevel": "xhigh"
     }
   },
   "tui": "fullscreen",

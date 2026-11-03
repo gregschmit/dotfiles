@@ -4,28 +4,22 @@
 git
 # Mostly for OSC 52:
 alacritty
-tmux
 vim
-neovim
 zsh
 
 # Misc
-# align
 htop
 # sqlite
 wget
 
 # Language Tools
 # nodenv
-perl
 # rustup-init
-# yarn
 
 # College
 # openjdk
 
 # Ruby Projects
-# anycable-go
 # freetds
 graphviz
 libpq", link: true

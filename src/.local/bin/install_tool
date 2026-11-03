@@ -1,6 +1,6 @@
 #!/bin/sh -e
 
-ALL_TOOLS="claude codex mise ollama opencode rustup uv"
+ALL_TOOLS="antigravity claude codex mise ollama opencode rustup uv"
 
 usage() {
   echo "Install one or more developer tools."
@@ -10,6 +10,11 @@ usage() {
   echo ""
   echo "Available tools: $ALL_TOOLS"
   exit 1
+}
+
+install_antigravity() {
+  # Installs the `agy` binary into `~/.local/bin`.
+  curl -fsSL https://antigravity.google/cli/install.sh | bash
 }
 
 install_claude() {
@@ -43,6 +48,7 @@ install_uv() {
 
 install_one() {
   case "$1" in
+    antigravity) install_antigravity ;;
     claude) install_claude ;;
     codex) install_codex ;;
     mise) install_mise ;;

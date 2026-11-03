@@ -10,10 +10,12 @@ install_symlink() {
 }
 
 # Directories (relative to src/) whose *contents* are symlinked individually into ~/<dir>/ rather
-# than symlinking the directory itself. This is needed for `.config` and `.local/bin` where
-# AppArmor allows `~/.config` or `~/.local/bin` but doesn't follow symlinks to them. Entries may
-# be nested paths; ancestor directories are mkdir -p'd as needed.
-EXPAND_DIRS=".config .local/bin"
+# than symlinking the directory itself. `.config` and `.local/bin` need this because AppArmor
+# allows `~/.config` or `~/.local/bin` but doesn't follow symlinks to them. `.claude`, `.codex`,
+# and `.gemini` (Antigravity) need it because those tools keep their state (sessions, history,
+# caches) next to their config, and that state belongs in the home directory, not in this repo.
+# Entries may be nested paths; ancestor directories are mkdir -p'd as needed.
+EXPAND_DIRS=".config .local/bin .claude .codex .gemini/config"
 
 # Check whether $1 exactly matches an entry in EXPAND_DIRS.
 is_expand_dir() {

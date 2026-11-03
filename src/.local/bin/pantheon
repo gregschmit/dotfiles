@@ -15,7 +15,7 @@
 
 """Pantheon: agent collaboration and convergence.
 
-Each agent is a real CLI (claude, codex, or gemini). A mode names its agents, and a plan: stages in
+Each agent is a real CLI (claude, codex, or agy). A mode names its agents, and a plan: stages in
 which the agents take turns, and in a loop, take them again until one of them finds the stage's
 halting prompt true. A stage can also let its agents stop the plan, when they find it should not go
 on, or let one agent pick the track the plan goes on with. A multi agent has an instance for each
@@ -44,12 +44,12 @@ message. Pantheon gives each post to every other agent, which decides
 whether it needs to act. So an agent can ask the team a question, or wake another agent. You can
 post too (ctrl+s): to answer, or to give a team that is done more work. Only those posts reach the
 agents as the user's. Pantheon's own lines in the room go to no agent. Each session has a private
-tmux server, so agents keep running when pantheon exits. Claude and codex report through hooks,
-which also bring each turn's last message; gemini reports through its window title, and pantheon
-reads its last message in the chat file gemini keeps. The room names the model each agent really
-runs, and claude's effort, where they differ from what pantheon asked for (gemini's model comes
-from its chat file). Unless it runs from a clone of gregschmit/dotfiles (git updates that),
-pantheon looks on GitHub for a newer version at most every 12 hours.
+tmux server, so agents keep running when pantheon exits. Each tool reports through hooks. Claude's
+and codex's bring each turn's last message; agy (Antigravity CLI) reads its hooks from the run
+dir, and its last message is in the transcript its hooks name; pantheon sees its dialogs on its
+screen. The room names the model each agent really runs, and claude's effort, where they differ
+from what pantheon asked for. Unless it runs from a clone of gregschmit/dotfiles (git updates
+that), pantheon looks on GitHub for a newer version at most every 12 hours.
 
 Files: ~/.local/state/pantheon (or $PANTHEON_HOME) holds config.toml and one sqlite file per
 session, sessions/<slug>.sqlite3. That file is the whole session: its record, its lock, the prompts,
@@ -131,7 +131,7 @@ VERSION = "0.3.0"
 # OLLAMA_COLORS, picked by its name so it stays put.
 THEME_PRIMARY = "#4ade80"
 THEME_ACCENT = "#22c55e"
-TOOL_COLORS = {"claude": "#d97757", "codex": "#3b82f6", "gemini": "#a855f7"}
+TOOL_COLORS = {"claude": "#d97757", "codex": "#3b82f6", "agy": "#a855f7"}
 OLLAMA_COLORS = ("#eab308", "#ef4444", "#22c55e")
 AGENT_BADGES = {
     "new": "·",
@@ -594,12 +594,6 @@ PROMPTS = {
         " The agents still run: post in the room (ctrl+s) to give them more work."
     ),
     "never_started": " No turn came for {names}, so they never started.",
-    # The first time pantheon answers a gemini dialog in yolo (GEMINI_HELD).
-    "held": (
-        "asks even in yolo before some commands and changes, such as a command with "
-        "a flag or path that also shows in tool output. Pantheon answers each such "
-        "dialog with Allow once."
-    ),
 }
 
 # ---------------------------------------------------------------------- tools and efforts
@@ -609,7 +603,7 @@ PROMPTS = {
 # in that order, and each single agent takes the first, unless the scramble setting
 # gives each agent its own order. An agent's model and effort come from the tool's own
 # config, unless a SPEC or an effort level sets them.
-TOOLS = ("claude", "codex", "gemini", "ollama")  # SPEC: TOOL[:MODEL][@EFFORT]
+TOOLS = ("claude", "codex", "agy", "ollama")  # SPEC: TOOL[:MODEL][@EFFORT]
 
 # Effort levels, for a mode (Mode.effort) or a run (--effort): the (model, effort) each
 # tool gets, where "" leaves that part to the tool. Aliases, not model IDs, so the table
@@ -618,34 +612,36 @@ EFFORTS = {
     "low": {
         "claude": ("haiku", "low"),
         "codex": ("", "low"),
-        "gemini": ("flash", ""),  # gemini has no effort: its model is the only knob
+        "agy": ("", "low"),  # agy's gemini models take low, medium, and high
         "ollama": ("", "low"),  # its think level, if the model has one
     },
     "medium": {
         "claude": ("sonnet", "medium"),
         "codex": ("", "medium"),
-        "gemini": ("auto", ""),  # gemini picks flash or pro for each turn
+        "agy": ("", "medium"),
         "ollama": ("", ""),  # models read medium differently, so each keeps its own
     },
     "high": {
         "claude": ("", "high"),  # your model
         "codex": ("", "high"),  # every codex model takes high
-        "gemini": ("pro", ""),  # as at max: nothing lies between auto and pro
+        "agy": ("", "high"),
         "ollama": ("", "high"),  # a model without high gets its own default
     },
     "max": {
         "claude": ("", "max"),  # your model, at its top effort
         "codex": ("", "xhigh"),  # every codex model takes xhigh; older ones lack max
-        "gemini": ("pro", ""),  # an account without pro gets a dialog on its first turn
+        "agy": ("", "high"),  # its top: its gemini models have no xhigh or max
         "ollama": ("", "max"),  # a model without max gets its default; gpt-oss: high
     },
 }
 
 # The effort words each tool takes. Pantheon checks them because the tools check late:
-# claude only warns on stderr, and codex fails on the first turn. Gemini takes none.
+# claude only warns on stderr, and codex fails on the first turn. agy checks at its start, but
+# then the agent never runs.
 TOOL_EFFORTS = {
     "claude": ("low", "medium", "high", "xhigh", "max", "ultracode"),
     "codex": ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
+    "agy": ("low", "medium", "high"),  # for its gemini models only (agy_effort)
     "ollama": ("low", "medium", "high", "xhigh", "max"),  # claude passes them on
 }
 
@@ -667,7 +663,7 @@ SETTINGS = {
     ),
     "disable_claude": Setting(False, "keep claude agents out of new sessions"),
     "disable_codex": Setting(False, "keep codex agents out of new sessions"),
-    "disable_gemini": Setting(False, "keep gemini agents out of new sessions"),
+    "disable_agy": Setting(False, "keep agy agents out of new sessions"),
     "disable_ollama": Setting(False, "keep ollama agents out of new sessions"),
     "ollama_url": Setting("", "the ollama server (empty: $OLLAMA_HOST, else local)"),
     "ollama_remote": Setting(
@@ -731,23 +727,25 @@ EARLIER_POSTS = 20
 # --------------------------------------------------------------------------------- timing
 
 STARTUP_TIMEOUT = 20  # seconds with no first signal: a startup dialog is likely waiting
-QUIET_TIMEOUT = 60  # seconds without output while working (codex and gemini)
+QUIET_TIMEOUT = 60  # seconds without output while working (codex and agy)
 PASTE_TIMEOUT = 3  # seconds for a paste to show in the input box; else a dialog took it
 SUBMIT_TIMEOUT = 10  # seconds after Enter for the agent's turn to start
-DIALOG_WAIT = 2  # seconds a gemini ✋ title gives its dialog to show, in yolo
+AGY_STOP_WAIT = (
+    3  # seconds agy's idle input box shows mid-turn before it counts as the end
+)
 LOCK_STALE = 30  # seconds without a heartbeat before a session lock counts as free
 STALE_DAYS = 7  # days with no room entry before pantheon sessions --prune deletes one
 
 # ----------------------------------------------------------- what the tools show and send
 
-# Text that shows an agent's input box (codex's and gemini's: an empty one); pantheon
-# types only when it shows. No dialog shows codex's or gemini's. Claude's ❯ also marks a
-# dialog's chosen row, so a claude agent gets no text before its first hook
-# (SessionStart), which comes after its startup dialogs.
+# Text that shows an agent's input box (codex's: an empty one; agy's: the line under an
+# empty one); pantheon types only when it shows. No dialog shows codex's or agy's.
+# Claude's ❯ also marks a dialog's chosen row, so a claude agent gets no text before its
+# first hook (SessionStart), which comes after its startup dialogs.
 INPUT_MARKERS = {
     "claude": ("❯",),
     "codex": ("Ask Codex to do anything", "Ask a follow-up question"),
-    "gemini": ("Type your message",),
+    "agy": ("? for shortcuts",),
     "ollama": ("❯",),
 }
 
@@ -759,14 +757,17 @@ CLAUDE_PASTED = (
 PASTED_RE = {
     "claude": re.compile(CLAUDE_PASTED),
     "codex": re.compile(r"\[PastedContent\d+chars\](?:#\d+)?"),
-    "gemini": re.compile(r"\[PastedText:\d+(?:lines|chars)(?:#\d+)?\]"),
+    "agy": re.compile(r"\[Pastedtext#\d+(?:\+\d+lines|chars)?\]"),  # #1 1001 chars
     "ollama": re.compile(CLAUDE_PASTED),
 }
 
-# Claude and codex hooks run this to add the hook's JSON to the session file.
+# Each tool's hooks run this to add the hook's JSON to the session file. agy's JSON does
+# not name its event, so agy's hooks give it as an argument.
 HOOK_PROGRAM = (
-    "import os, sqlite3, sys; "
+    "import json, os, sqlite3, sys; "
     'd = sys.stdin.buffer.read().decode("utf-8", "replace"); '
+    'd = json.dumps({**json.loads(d), "hook_event_name": sys.argv[1]}) '
+    "if sys.argv[1:] else d; "
     'c = sqlite3.connect(os.environ["PANTHEON_DB"], uri=True, timeout=10); '
     'c.execute("INSERT INTO hooks (agent, payload) VALUES (?, ?)", '
     '(os.environ["PANTHEON_AGENT"], d)); '
@@ -797,27 +798,13 @@ CODEX_HOOK_LABELS = {
     "PostToolUse": "post_tool_use",
     "Stop": "stop",
 }
-GEMINI_WORKING = ("✦", "⏲")
-GEMINI_ASKS = "action required"  # why a gemini agent with a ✋ title needs you
-
-# Gemini asks even in yolo before a shell command with a flag, path, or URL that also
-# shows in tool output, before a build or test command once it changed a build file,
-# and before it changes a build file. In a yolo session, while gemini's input box last
-# showed it in yolo, pantheon answers each of these once (held_dialog). It knows one by
-# a word in its warning's heading: "Untrusted Command Flags Detected", "CAUTION: Build
-# Configuration Was Recently Modified", "Build File Modification". Two warnings show
-# side by side, so their lines mix, but a word stays whole. A dialog that an ask rule
-# of your own opens for such a command looks the same, so pantheon answers it too.
-GEMINI_HELD = ("Untrusted", "CAUTION:", "Modification")
-# Then its question and options, as on a screen with TYPED_NOISE_RE's spaces and box
-# edges taken out; ● marks the chosen option. The key 1 picks Allow once at once.
-GEMINI_HELD_RE = re.compile(
-    r"(?:Allowexecutionof\[Shell\]\?|Applythischange\?)●?1\.Allowonce●?2\."
-    r"(?:Modifywithexternaleditor●?3\.)?No,suggestchanges\(esc\)"
-)
-# Below those options, these mean the live dialog is another one, or none: another
-# list, an ask_user question, or the input box, which gemini hides under a dialog.
-GEMINI_NOT_LIVE = ("●", "Answer Questions", "Type your")
+# agy's hooks. Never PreToolUse: agy reads a {} there as "deny". agy has none for a
+# prompt (its turn starts at its first PreInvocation), a dialog, or a model switch.
+AGY_HOOK_EVENTS = ("SessionStart", "PreInvocation", "PostToolUse", "Stop")
+# A dialog on agy's screen: the help line at its foot, and the line over what it would
+# run, in a permission prompt.
+AGY_DIALOG = "↑/↓ Navigate"
+AGY_PERMISSION = "Requesting permission for:"
 
 TMUX_LIMIT = 16364  # bytes in one tmux command: new-session and all its arguments
 
@@ -922,7 +909,7 @@ CREATE TABLE agents (                       -- one per instance, made for its fi
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,              -- <role>-<key>, e.g. reviewer-codex
     role TEXT NOT NULL DEFAULT '',          -- the mode's agent it is an instance of
-    tool TEXT NOT NULL DEFAULT '',          -- claude, codex, gemini, or ollama
+    tool TEXT NOT NULL DEFAULT '',          -- claude, codex, agy, or ollama
     model TEXT NOT NULL DEFAULT '',
     effort TEXT NOT NULL DEFAULT '',
     native_id TEXT NOT NULL DEFAULT '',     -- the tool's own session id
@@ -966,10 +953,22 @@ CREATE TABLE events (                       -- the room, plus hook summaries (ki
 # ---------------------------------------------------------------------------------- tools
 
 
-def hook_cmd() -> str:
+def hook_cmd(event: str = "") -> str:
     # Silent, because hook output can reach the model, and never a failure, so a broken
     # hook cannot get in an agent's way.
-    return f"{shlex.quote(sys.executable)} -I -c {shlex.quote(HOOK_PROGRAM)} 2>/dev/null || true"
+    cmd = f"{shlex.quote(sys.executable)} -I -c {shlex.quote(HOOK_PROGRAM)}"
+    return cmd + (f" {event}" if event else "") + " 2>/dev/null || true"
+
+
+def agy_hooks() -> str:
+    """The hooks.json that agy reads in each folder --add-dir gives it, since it takes no
+    hooks in --settings. Each prints {}, which agy reads as "go on"."""
+    spec = {}
+    for event in AGY_HOOK_EVENTS:
+        hook = {"command": hook_cmd(event) + "; echo '{}'", "timeout": 10}
+        tools = event.endswith("ToolUse")  # these take a matcher
+        spec[event] = [{"matcher": "*", "hooks": [hook]}] if tools else [hook]
+    return json.dumps({"pantheon": spec}, indent=2)
 
 
 def claude_settings() -> dict:
@@ -1029,17 +1028,15 @@ def model_args(tool: str, model: str, effort: str) -> list[str]:
         argv = ["-m", model] if model else []
         flag = f"model_reasoning_effort={json.dumps(effort)}"
         return argv + (["-c", flag] if effort else [])
-    if tool == "gemini":  # gemini takes effort only through its model
-        return ["-m", model] if model else []
     return (["--model", model] if model else []) + (
         ["--effort", effort] if effort else []
     )
 
 
 def prompt_args(tool: str, text: str) -> list[str]:
-    """The arguments that give a tool its first prompt. Gemini's -i would read a text
-    that starts with "-" as a flag."""
-    if tool == "gemini":
+    """The arguments that give a tool its first prompt. agy's would read a text that
+    starts with "-" as a flag."""
+    if tool == "agy":
         return [f"--prompt-interactive={text}"]
     return ["--", text]
 
@@ -1128,74 +1125,56 @@ def launch_codex(s: Session, a: AgentRun) -> tuple[list[str], dict]:
     return argv, {}
 
 
-def launch_gemini(s: Session, a: AgentRun) -> tuple[list[str], dict]:
-    # Gemini 0.64 reads injected settings only from root-owned files, so it gets no hooks;
-    # pantheon follows its window title instead, and reads its chat file (gemini_turn).
-    # No --skip-trust: gemini asks you once per repo before it loads the repo's .gemini
-    # settings.
-    argv = [tool_path("gemini"), "--session-id", a.native_id]
-    argv += ["--include-directories", s.scratch]
-    argv += model_args("gemini", a.model, a.effort)
+def launch_agy(s: Session, a: AgentRun) -> tuple[list[str], dict]:
+    # Its hooks go in the run dir, which it gets with --add-dir, and not in the repo. No
+    # trust override: agy asks you once per folder, through the startup watchdog.
+    hooks = Path(s.scratch) / ".agents" / "hooks.json"
+    private_dir(hooks.parent)
+    write_private(hooks, agy_hooks())
+    argv = [tool_path("agy"), "--add-dir", s.scratch]
+    argv += model_args("agy", a.model, a.effort)
     if s.yolo:
-        argv += ["--approval-mode", "yolo"]
+        argv.append("--dangerously-skip-permissions")
     return argv, {}
 
 
-def gemini_turn(native_id: str) -> tuple[str, str]:
-    """The model of gemini's last reply in a session, and the last message of its last
-    turn, from the chat file gemini keeps; "" for each one it does not find. With -m
-    auto, gemini picks the model again for each prompt. Gemini adds each message to the
-    file as soon as the model finishes it, so before its title shows the turn's end."""
-    home, pattern = gemini_home(), f"tmp/*/chats/session-*-{native_id[:8]}.jsonl"
-    # gemini in its macOS sandbox cannot write ~/.gemini, so it keeps them in ~/.cache.
-    sandboxed = home.parent / ".cache" / ".gemini"
-    files = []
-    for f in [*home.glob(pattern), *sandboxed.glob(pattern)]:
-        try:  # the name has only 8 characters of the id; the first line has all of it
-            with f.open(encoding="utf-8") as fh:
-                if json.loads(fh.readline()).get("sessionId") == native_id:
-                    files.append((f.stat().st_mtime, f))
-        except (OSError, ValueError, AttributeError):
-            continue
-    if not files:
-        return "", ""
-    try:  # the newest: gemini can start a second file for the same session
-        with max(files)[1].open("rb") as fh:
-            size = fh.seek(0, os.SEEK_END)
-            fh.seek(max(0, size - 1_000_000))  # its last reply is near the end
-            lines = fh.read().splitlines()
+def agy_reply(transcript: str) -> str:
+    """The last message of agy's last turn, from the transcript its hooks name, or "":
+    its last reply after the turn's prompt. agy adds each step as it ends, so the reply
+    is there by the turn's Stop."""
+    try:
+        with open(transcript, "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            f.seek(max(0, size - 1_000_000))  # the turn's end is near the file's end
+            lines = f.read().splitlines()
     except OSError:
-        return "", ""
-    text, turn = "", True
+        return ""
     for line in reversed(lines):
         try:
             rec = json.loads(line)
-        except ValueError:  # the first line, cut by the seek, or one being written
+        except ValueError:  # the first line, cut by the seek
             continue
-        if not isinstance(rec, dict):
-            continue
-        # A prompt, or a tool's output: a message before it is an earlier turn's.
-        if rec.get("type") == "user":
-            turn = False
-        if rec.get("type") != "gemini":
-            continue
-        if turn:
-            text, turn = part_text(rec.get("content")), False
-        model = rec.get("model")
-        # "auto" means its router failed, so the line names no real model.
-        if isinstance(model, str) and model and not model.startswith("auto"):
-            return model, text
-    return "", text
+        kind = rec.get("type") if isinstance(rec, dict) else None
+        if kind == "USER_INPUT":  # the turn had no reply
+            return ""
+        if kind == "PLANNER_RESPONSE":
+            content = rec.get("content")
+            return content if isinstance(content, str) else ""
+    return ""
 
 
-def part_text(content) -> str:
-    """The text of a gemini message: a string, a part, or a list of them."""
-    parts = content if isinstance(content, list) else [content]
-    return "".join(
-        p if isinstance(p, str) else str(p.get("text") or "")
-        for p in parts
-        if isinstance(p, str) or (isinstance(p, dict) and not p.get("thought"))
-    )
+def agy_asks(screen: str) -> str:
+    """Why agy waits on you, from its screen, or "": the live dialog's help line is at
+    the screen's foot. A permission prompt names what agy would run; another dialog,
+    its question, as "Do you trust the contents of this project?"."""
+    lines = [line.strip() for line in screen.splitlines() if line.strip()]
+    if not any(AGY_DIALOG in line for line in lines[-4:]):
+        return ""
+    for i, line in enumerate(lines[:-1]):
+        if line.startswith(AGY_PERMISSION):
+            return "permission: " + shorten(lines[i + 1], 100)
+    questions = [line for line in lines if line.endswith("?")]
+    return shorten(questions[-1], 100) if questions else "a dialog"
 
 
 def launch_ollama(s: Session, a: AgentRun) -> tuple[list[str], dict]:
@@ -1225,7 +1204,7 @@ def launch_ollama(s: Session, a: AgentRun) -> tuple[list[str], dict]:
 LAUNCHERS = {
     "claude": launch_claude,
     "codex": launch_codex,
-    "gemini": launch_gemini,
+    "agy": launch_agy,
     "ollama": launch_ollama,
 }
 
@@ -1318,12 +1297,10 @@ def clean_instructions(text: str, tool: str) -> str:
     """text as pantheon gives it to a tool, typed or on its command line: as plain text
     to the tool, with nothing in it that the tool would act on."""
     text = CONTROL_RE.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
-    if tool == "gemini":  # gemini's own escapeAtSymbols: "@path" would add a file
-        text = re.sub(r"(?<!\\)@", r"\\@", text)
     if tool in ("claude", "ollama"):
         text = CLAUDE_IMAGE_RE.sub(lambda m: f"`{m[2]}`", text)
-    # One newline at the end: tmux keeps a last ";", gemini keeps Enter after a last
-    # "\", and Enter cannot take a completion the text's last word opened.
+    # One newline at the end: tmux keeps a last ";", and Enter cannot take a completion
+    # the text's last word opened.
     return text.strip("\n") + "\n"
 
 
@@ -1332,9 +1309,7 @@ def collapses(tool: str, text: str) -> bool:
     units = len(text.encode("utf-16-le")) // 2  # how JavaScript counts a string
     if tool in ("claude", "ollama"):  # claude counts a tab as 4 spaces
         return units + 3 * text.count("\t") > 800 or text.count("\n") > 2
-    if tool == "codex":
-        return len(text) > 1000
-    return len(text.split("\n")) > 5 or units > 500  # gemini
+    return len(text) > 1000  # codex and agy, whatever its lines
 
 
 def paste_shown(tool: str, before: str, after: str, text: str) -> bool:
@@ -1349,44 +1324,6 @@ def paste_shown(tool: str, before: str, after: str, text: str) -> bool:
         return False  # a long text shows only as a placeholder, never as its end
     tail = TYPED_NOISE_RE.sub("", text)[-60:]
     return bool(tail) and a.count(tail) > b.count(tail)
-
-
-def held_dialog(screen: str) -> str:
-    """The dialog on a gemini screen, if gemini opens it even in yolo (GEMINI_HELD):
-    its text from its first line to its options, which tells one from the next; else
-    "". Only the live dialog counts: its options come last, with nothing below them
-    from GEMINI_NOT_LIVE (unless ui.collapseDrawerDuringApproval is false, which keeps
-    the input box under a dialog), so a dialog that history quotes does not count."""
-    lines = [TYPED_NOISE_RE.sub("", line) for line in screen.splitlines()]
-    flat = "".join(lines)
-    found = list(GEMINI_HELD_RE.finditer(flat))
-    if not found:
-        return ""
-    m = found[-1]
-    after = flat[m.end() :]
-    if any(TYPED_NOISE_RE.sub("", t) in after for t in GEMINI_NOT_LIVE):
-        return ""
-    body = flat.rfind("╯", 0, m.start())  # the end of its command or diff box
-    if body < 0 or not any(w in flat[body : m.start()] for w in GEMINI_HELD):
-        return ""
-    # From its first line, "? Shell  <command>" ("2 of 3" when more wait). It is off the
-    # top of a dialog taller than the pane; the text then starts at the top.
-    start = at = 0
-    for line in lines:
-        if at >= m.start():
-            break
-        if line.startswith("?"):
-            start = at
-        at += len(line)
-    return BOX_RE.sub("", flat[start : m.end()])
-
-
-def gemini_yolo(screen: str) -> bool | None:
-    """Whether gemini's empty input box shows it in yolo, where its prompt is * (> in
-    its other modes), or None with no such box on the screen."""
-    flat = TYPED_NOISE_RE.sub("", screen)
-    at = flat.rfind(TYPED_NOISE_RE.sub("", INPUT_MARKERS["gemini"][0]))
-    return {"*": True, ">": False}.get(flat[at - 1]) if at > 0 else None
 
 
 def last_lines(screen: str, n: int = 8) -> str:
@@ -1438,9 +1375,9 @@ def toml_dumps(data: dict) -> str:
 
 
 def read_jsonc(path: Path) -> dict:
-    """Read a JSON file that may have // and /* */ comments (gemini's settings)."""
+    """Read a JSON file that may have // and /* */ comments."""
     try:
-        # Like gemini (Node), read a bad byte as U+FFFD, so we see the settings it uses.
+        # As the tools do, read a bad byte as U+FFFD, so we see the settings they use.
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}
@@ -1769,10 +1706,6 @@ def ollama_problem(cfg: dict) -> str:
     )
 
 
-def gemini_home() -> Path:
-    return Path(os.environ.get("GEMINI_CLI_HOME") or Path.home()) / ".gemini"
-
-
 def dig(d, *keys):
     """d[k1][k2]..., or None when a level is missing or is not an object. For JSON
     that you wrote by hand."""
@@ -1801,12 +1734,6 @@ def tool_problems(cfg: dict) -> dict[str, str]:
             out[tool] = "not installed"
         else:
             out[tool] = ""
-    # pantheon follows gemini by its window title.
-    settings = read_jsonc(gemini_home() / "settings.json")
-    if not out["gemini"] and dig(settings, "ui", "dynamicWindowTitle") is False:
-        out["gemini"] = "ui.dynamicWindowTitle is off, so pantheon cannot follow it"
-    if not out["gemini"] and dig(settings, "ui", "hideWindowTitle"):
-        out["gemini"] = "ui.hideWindowTitle is on, so pantheon cannot follow it"
     return out
 
 
@@ -1874,40 +1801,13 @@ def detect_codex() -> dict:
     }
 
 
-def gemini_auth(home: Path) -> tuple[str, bool]:
-    settings = read_jsonc(home / "settings.json")
-    auth = dig(settings, "security", "auth", "selectedType")
-    auth = auth if isinstance(auth, str) else ""
-    if not auth:
-        if os.environ.get("GOOGLE_GENAI_USE_GCA") == "true":
-            auth = "oauth-personal"
-        elif os.environ.get("GOOGLE_GENAI_USE_VERTEXAI") == "true":
-            auth = "vertex-ai"
-        elif os.environ.get("GEMINI_API_KEY"):
-            auth = "gemini-api-key"
-    if auth == "oauth-personal":
-        encrypted = os.environ.get("GEMINI_FORCE_ENCRYPTED_FILE_STORAGE") == "true"
-        return auth, encrypted or (home / "oauth_creds.json").exists()
-    if auth == "gemini-api-key":
-        return auth, bool(os.environ.get("GEMINI_API_KEY"))
-    if auth == "vertex-ai":
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT") and os.environ.get(
-            "GOOGLE_CLOUD_LOCATION"
-        )
-        return auth, bool(os.environ.get("GOOGLE_API_KEY") or project)
-    return auth, auth in ("compute-default-credentials", "gateway", "cloud-shell")
-
-
-def detect_gemini() -> dict:
-    path = shutil.which("gemini")
+def detect_agy() -> dict:
+    path = shutil.which("agy")
     if not path:
         return {"note": "not installed"}
-    # Every gemini run registers its cwd as a gemini project, so run it from pantheon's dir.
-    rc, out, _ = run_cmd([path, "--version"], cwd=HOME, env=clean_env(), timeout=60)
+    rc, out, _ = run_cmd([path, "--version"], env=clean_env(), timeout=60)
     version = out.strip().splitlines()[-1] if rc == 0 and out.strip() else ""
-    auth, ok = gemini_auth(gemini_home())
-    note = "" if ok else "not signed in (run gemini once)"
-    return {"path": path, "version": version, "auth": auth, "note": note}
+    return {"path": path, "version": version}
 
 
 def ollama_get(url: str, path: str, token_env: str = "", timeout: float = 3.0):
@@ -1936,13 +1836,12 @@ def agent_file_warnings(problems: dict[str, str]) -> list[str]:
         / "CLAUDE.md",
         "codex": Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
         / "AGENTS.md",
-        "gemini": Path(os.environ.get("GEMINI_CLI_HOME") or Path.home())
-        / ".gemini"
-        / "GEMINI.md",
+        "agy": Path.home() / ".gemini" / "AGENTS.md",  # or GEMINI.md, as agy reads both
     }
     out = []
     for tool, path in files.items():
-        if problems[tool] or path.exists():
+        also = tool == "agy" and path.with_name("GEMINI.md").exists()
+        if problems[tool] or path.exists() or also:
             continue
         hint = f" (for example: ln -s {shared} {path})" if shared.exists() else ""
         out.append(f"{tool} cannot see a global agent file at {path}{hint}")
@@ -1955,7 +1854,7 @@ def cmd_tools(cfg: dict) -> None:
     found = {
         "claude": detect_claude(),
         "codex": detect_codex(),
-        "gemini": detect_gemini(),
+        "agy": detect_agy(),
     }
     server, answer = ollama_server(cfg), None
     if not problems["ollama"]:
@@ -2111,18 +2010,8 @@ def tool_defaults(tool: str, workdir: str) -> dict[str, str]:
             "model": " over ".join(model) or "codex's default",
             "effort": " over ".join(effort) or "the model's default",
         }
-    if tool == "gemini":
-        model = []
-        if value := os.environ.get("GEMINI_MODEL"):
-            model.append(f"{value} ($GEMINI_MODEL)")
-        user = gemini_home() / "settings.json"
-        workspace = Path(workdir) / ".gemini" / "settings.json"
-        for path, note in ((workspace, trusted), (user, "")):
-            if note and os.path.realpath(path) == os.path.realpath(user):
-                continue
-            if value := text_of(dig(read_jsonc(path), "model", "name")):
-                model.append(f"{value} ({short_home(str(path))}{note})")
-        return {"model": " over ".join(model) or "auto, gemini's default"}
+    if tool == "agy":  # pantheon does not read agy's settings
+        return {"model": "agy's own choice", "effort": "the model's own"}
     return {}  # ollama: pantheon always passes its model
 
 
@@ -2440,6 +2329,15 @@ def effort_level(mode: Mode, effort: str | None) -> str:
     return mode.effort if effort is None else effort
 
 
+def agy_effort(model: str) -> bool:
+    """Whether agy takes --effort with this model: its default, or a gemini model with
+    no level in its name (gemini-3.8-flash, not gemini-3.8-flash-low); it refuses one
+    for its other models."""
+    return not model or (
+        model.startswith("gemini") and not re.search(r"-(low|medium|high)$", model)
+    )
+
+
 def ollama_model_for(cfg: dict, level: str) -> str:
     """The model a plain ollama gets: ollama_models' for the level, else ollama_model."""
     return setting(cfg, "ollama_models").get(level, "") or setting(cfg, "ollama_model")
@@ -2511,19 +2409,22 @@ def resolve_roster(
         tool, model, effort = parse_spec(spec)
         if problems[tool]:
             raise PrepError(f"{tool} cannot run here: {problems[tool]}")
-        if tool == "gemini" and effort:
-            note = (
-                f"gemini takes effort only through its model, so @{effort} is ignored"
-            )
-            notes.extend([note] if note not in notes else [])
-            effort = ""
         if effort and effort not in TOOL_EFFORTS[tool]:
             raise PrepError(
                 f"{tool} takes effort {', '.join(TOOL_EFFORTS[tool])}, not {effort!r}"
             )
         # Your SPEC's parts win, the level fills the blanks, and the tool does the rest.
         cell = EFFORTS[level][tool] if level else ("", "")
+        asked = effort
         model, effort = model or cell[0], effort or cell[1]
+        if tool == "agy" and effort and not agy_effort(model):
+            if asked:  # the level's own effort goes quietly
+                note = (
+                    f"agy takes effort only for a gemini model with no level in its "
+                    f"name, so @{effort} is ignored for {model}"
+                )
+                notes.extend([note] if note not in notes else [])
+            effort = ""
         if tool == "ollama" and not model:
             model = ollama_model_for(cfg, level)
             if not model:
@@ -3070,7 +2971,7 @@ def tmux_name(slug: str) -> str:
 
 
 def signal_group(pid: int, sig: int) -> bool:
-    """Signal a pane's process group (gemini ignores hangups). False if it is gone."""
+    """Signal a pane's process group (a tool may ignore hangups). False if it is gone."""
     try:
         os.killpg(pid, sig)
     except ProcessLookupError:
@@ -3167,14 +3068,9 @@ class AgentRun:
     reason: str
     launched: float = 0.0  # time.time() at launch, for the startup watchdog
     activity: float = 0.0  # tmux #{window_activity}
-    title: str = ""
     typeable: bool = False  # it needs you, but pantheon may still type to it
-    saw_work: bool = False  # gemini showed its working title since its last turn ended
-    asked: float = 0.0  # when its ✋ title showed, in yolo: the dialog gets DIALOG_WAIT
-    allowed: str = ""  # the held dialog pantheon last pressed 1 on (held_dialog's text)
-    # Whether its input box last showed gemini in yolo (gemini_yolo), so pantheon may
-    # answer its held dialogs. None: not seen since it started or you were in.
-    may_answer: bool | None = None
+    idle_since: float = 0.0  # agy: when its screen showed its input box mid-turn
+    dialog: str = ""  # agy: the dialog its screen shows (agy_asks), which needs you
     in_turn: bool = False  # from a prompt to its Stop: tool hooks count only then
     ran: tuple[str, str] = ("", "")  # the model and effort it reports, as last known
     no_effort: bool | None = None  # claude_sends_no_effort, once read
@@ -3323,9 +3219,8 @@ class Session:
         ).fetchone()[0]
         if a.state == "starting":
             a.launched = time.time()  # so the startup watchdog still fires
-        if a.tool == "gemini" and a.state in ("working", "needs_you"):
-            # Its next ◇ title ends the turn, even one that ended while closed.
-            a.saw_work = True
+        if a.tool == "agy" and a.state in ("working", "needs_you"):
+            a.in_turn = True  # so poll_panes sees a turn that ended while closed
         if a.state == "needs_you":
             row = self.db.execute(
                 "SELECT data FROM events WHERE agent_id = ? AND kind = 'needs'"
@@ -3611,6 +3506,9 @@ class Session:
         if a.state in ("new", "exited"):
             return
         a.hooked = True
+        if a.tool == "agy":
+            self.on_agy_hook(a, name, ev)
+            return
         # A subagent's hooks, or those of a thread of the tool's own (codex's memories),
         # have no transcript of the agent's: they name another model and effort.
         if not ev.get("agent_id") and ev.get("transcript_path"):
@@ -3699,49 +3597,66 @@ class Session:
         for text in posts:
             self.post(a.name, text)
 
-    def gemini_turn_ended(self, a: AgentRun) -> None:
-        model, message = gemini_turn(a.native_id)
-        self.note_ran(a, model)  # before the step's report
-        self.replied(a, message)
-        self.turn_ended(a)
-
-    def on_title(self, a: AgentRun, title: str) -> None:
-        glyph = title.strip()[:1]
-        if glyph != "✋":
-            a.asked, a.allowed = 0.0, ""  # the next ✋ is a new dialog
-        # Gemini's title changes inside a turn too; only the first change starts it.
-        starts = glyph in (*GEMINI_WORKING, "✋") and not a.saw_work
-        if glyph in GEMINI_WORKING:
-            a.saw_work = True
-            self.set_state(a, "working")
-            if starts:
-                self.turn_started(a, "")
-        elif glyph == "✋":
-            a.saw_work = True
-            if starts:
-                self.turn_started(a, "")
-            # In yolo, gemini_asks looks at the dialog first, with no typing meanwhile,
-            # unless the dialog needs you already (a reopen sees its title anew).
-            if not self.yolo:
-                self.needs_you(a, GEMINI_ASKS)
-            elif a.reason != GEMINI_ASKS:
+    def on_agy_hook(self, a: AgentRun, name: str, ev: dict) -> None:
+        """agy's hooks (AGY_HOOK_EVENTS), in camelCase. Each names the model it runs. A
+        turn starts at its first PreInvocation; one that Esc ends sends no Stop, so
+        on_agy_screen ends it."""
+        self.note_ran(a, ev.get("modelName"))
+        if name == "SessionStart":
+            if ev.get("conversationId") and not a.native_id:
+                self.save_agent(a, native_id=str(ev["conversationId"]))
+        elif name == "PreInvocation" and ev.get("invocationNum", 0) == 0:
+            a.in_turn, a.idle_since = True, 0.0
+            if not a.dialog:
                 self.set_state(a, "working")
-        elif glyph == "◇" and a.saw_work:  # gemini shows ◇ at startup too
-            a.saw_work = False
-            self.gemini_turn_ended(a)
+            self.turn_started(a, str(ev.get("lastUserInput", "")))
+        elif name in ("PreInvocation", "PostToolUse"):
+            # agy runs on behind its trust prompt, so only the screen ends a dialog.
+            if a.in_turn and not a.dialog:
+                self.set_state(a, "working")
+        elif name == "Stop":
+            if not a.in_turn:
+                return  # on_agy_screen ended it already
+            if ev.get("terminationReason") == "ERROR":
+                a.in_turn = False
+                self.needs_you(a, f"error: {ev.get('error') or 'unknown'}")
+                return
+            self.replied(a, agy_reply(str(ev.get("transcriptPath") or "")))
+            a.in_turn = False
+            self.turn_ended(a)
+
+    def on_agy_screen(self, a: AgentRun, screen: str, now: float) -> None:
+        """agy's screen mid-turn, for what no hook of its says: a dialog that waits on
+        you, or its input box, which an Esc leaves with no Stop."""
+        why = agy_asks(screen)
+        if why:
+            a.dialog, a.idle_since = why, 0.0
+            self.needs_you(a, why)
+            return
+        if a.dialog:  # you answered it
+            a.dialog = ""
+            if a.state == "needs_you":
+                self.set_state(a, "working")
+        if not any(m in screen for m in INPUT_MARKERS["agy"]):
+            a.idle_since = 0.0
+            return
+        a.idle_since = a.idle_since or now
+        if now - a.idle_since >= AGY_STOP_WAIT:  # its Stop would have come by now
+            a.in_turn, a.idle_since = False, 0.0
+            self.turn_ended(a)
 
     def turn_started(self, a: AgentRun, prompt: str) -> None:
         """A turn started, so a paste that this turn took is done. A turn that
         pantheon's Enter did not start is yours, by transport, and you may have entered
-        a text pantheon pasted, even before a reopen. Claude's and codex's hooks give
-        the prompt, which then has the text's first line (it names the step or the
-        post). Gemini's give none, so its turn counts as your Enter only if the paste
-        showed in its input box while you were in. Another turn (one you queued, or a
-        background task's) leaves the paste in the box, for check_paste to enter."""
+        a text pantheon pasted, even before a reopen. The hooks give the prompt, which
+        then has the text's first line (it names the step or the post); with none, the
+        turn counts as your Enter only if the paste showed in its input box while you
+        were in. Another turn (one you queued, or a background task's) leaves the paste
+        in the box, for check_paste to enter."""
         p, a.pasting = a.pasting, None
         if p is not None and p.entered:
             return
-        if prompt:  # claude and codex
+        if prompt:
             # Its reply is for you, unless you entered a post.
             self.save_agent(a, answering=False)
             item = next(
@@ -3752,7 +3667,7 @@ class Session:
                 ),
                 None,
             )
-        else:  # gemini
+        else:
             item = p.item if p is not None and p.shown else None
         if item is not None:
             a.outbox = [o for o in a.outbox if o is not item]
@@ -3836,14 +3751,14 @@ class Session:
     async def poll_panes(self, now: float) -> None:
         if not self.live_agents():
             return
-        fmt = "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{window_activity}\t#{pane_title}"
+        fmt = "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{window_activity}"
         try:
             out = await self.tmux.run("list-panes", "-a", "-F", fmt)
         except TmuxError:
             self.all_exited()
             return
         for line in out.splitlines():
-            name, dead, status, activity, title = (line.split("\t", 4) + [""] * 5)[:5]
+            name, dead, status, activity = (line.split("\t", 3) + [""] * 4)[:4]
             a = self.agents.get(name)
             if a is None or a.state in ("new", "exited"):
                 continue
@@ -3862,31 +3777,17 @@ class Session:
                 )
                 self.exited(a, status, last_lines(screen))
                 continue
-            if a.tool == "gemini" and title != a.title:
-                self.on_title(a, title)
-            a.title = title
-            if a.tool != "gemini" or not self.yolo:
-                continue
-            # Each poll, since one dialog can follow another with no new title.
-            if title.strip()[:1] == "✋":
-                await self.gemini_asks(a, now)
-            elif a.may_answer is None and self.attached != a.name:
+            # Once its turn started (no paste of pantheon's waits), and not while you
+            # are in its screen.
+            busy = a.in_turn and a.pasting is None and self.attached != a.name
+            if a.tool == "agy" and busy:
                 screen = await self.tmux.run(
                     "capture-pane", "-p", "-J", "-t", pane(name), check=False
                 )
-                a.may_answer = gemini_yolo(screen)
+                self.on_agy_screen(a, screen, now)
 
     def exited(self, a: AgentRun, status: str, tail: str = "") -> None:
         self.read_hooks()  # a Stop that came just before the exit ends its turn first
-        step = self.open_step(a, sent_only=True)
-        if step is not None and a.tool == "gemini":
-            # Its ◇ title, which ends a turn, may not have come before the exit; its
-            # chat file has the turn's last message.
-            model, message = gemini_turn(a.native_id)
-            if read_reply(message)[1] in step["statuses"].split():
-                self.note_ran(a, model)
-                self.replied(a, message)
-                self.turn_ended(a)
         # A turn that never reached it goes back to the plan, which starts the agent
         # again, fresh, for it: while the session goes on, and only when the agent had
         # a report since it last started (a start that failed would only fail again).
@@ -3946,7 +3847,7 @@ class Session:
                 )
             elif (
                 a.state == "working"
-                and a.tool in ("codex", "gemini")
+                and a.tool in ("codex", "agy")
                 and a.activity
                 and now - a.activity > QUIET_TIMEOUT
             ):
@@ -4402,8 +4303,8 @@ class Session:
             if self.attached == a.name:  # never type into an agent you are in
                 if p is not None and not p.entered:
                     p.looked = True
-                    # Kept once seen: your Enter empties the box before gemini's title
-                    # shows the turn.
+                    # Kept once seen: your Enter empties the box before the turn's
+                    # first hook comes.
                     if not p.shown:
                         screen = await self.tmux.run(
                             "capture-pane", "-p", "-J", "-t", pane(a.name), check=False
@@ -4432,10 +4333,14 @@ class Session:
             "capture-pane", "-p", "-J", "-t", target, check=False
         )
         if not any(m in screen for m in INPUT_MARKERS[a.tool]):
+            # agy says what its dialog asks; its trust prompt stays up even as its first
+            # turn, from its command line, runs.
+            if a.tool == "agy" and (why := agy_asks(screen)):
+                self.needs_you(a, why, typeable=True)
+                return
             # Never type on an unknown screen: a dialog would take the text, and some
             # take Enter as "No, exit". Past its start (the startup watchdog's), a
-            # dialog that stays needs you: gemini asks one after its first turn when
-            # it does not trust the run dir yet.
+            # dialog that stays needs you.
             a.waiting_since = a.waiting_since or now
             if a.state != "starting" and now - a.waiting_since > 15:
                 self.needs_you(
@@ -4464,7 +4369,7 @@ class Session:
             "capture-pane", "-p", "-J", "-t", target, check=False
         )
         if paste_shown(a.tool, p.before, screen, p.text):
-            if now - p.at < 0.1:  # gemini takes an Enter so soon as a newline
+            if now - p.at < 0.1:  # an Enter so soon can count as a newline
                 return
             await self.tmux.run("send-keys", "-t", target, "Enter")
             a.outbox = [o for o in a.outbox if o is not p.item]
@@ -4505,53 +4410,6 @@ class Session:
             return
         a.pasting = None
         self.needs_you(a, "what pantheon typed did not start a turn")
-
-    async def gemini_asks(self, a: AgentRun, now: float) -> None:
-        """A ✋ title in a yolo session: press 1, Allow once, on a dialog gemini opens
-        even in yolo (held_dialog), if allow_held says so."""
-        target = pane(a.name)
-        held = ""
-        if self.attached != a.name and a.may_answer:
-            screen = await self.tmux.run(
-                "capture-pane", "-p", "-J", "-t", target, check=False
-            )
-            held = held_dialog(screen)
-            if held:
-                await self.leave_copy_mode(target)
-        # allow_held checks again whether you came in: no await from there to the key.
-        if self.allow_held(a, held, now):
-            await self.tmux.run("send-keys", "-t", target, "1", check=False)
-
-    def allow_held(self, a: AgentRun, held: str, now: float) -> bool:
-        """Whether to press 1 on the held dialog (held_dialog's text) now. Not while you
-        are in its screen, or while gemini may not be in yolo (may_answer): then it
-        needs you at once. Else once for each dialog, since the next poll can still show
-        the old one. Any other dialog needs you once it had DIALOG_WAIT to show, as does
-        a held one that stays after its 1."""
-        if self.attached == a.name or not a.may_answer:
-            self.needs_you(a, GEMINI_ASKS)
-            return False
-        a.asked = a.asked or now
-        if held and held != a.allowed:
-            a.allowed, a.asked = held, now
-            self.set_state(a, "working")  # it may have needed you meanwhile
-            # One note for each run, also over a reopen, and no command in it: in the
-            # room, a command's flags and paths would hold the same ones that other
-            # gemini agents run, and gemini's own screen shows each command.
-            noted = self.db.execute(
-                "SELECT 1 FROM events WHERE agent_id = ? AND kind = 'note' AND text = ?"
-                " AND id > (SELECT COALESCE(MAX(id), 0) FROM events WHERE agent_id = ?"
-                " AND kind = 'start') LIMIT 1",
-                (a.id, PROMPTS["held"], a.id),
-            ).fetchone()
-            if noted is None:
-                self.event("note", PROMPTS["held"], a)
-            return True
-        if not held:
-            a.allowed = ""  # it went, so the same text again is a new dialog
-        if now - a.asked >= DIALOG_WAIT:
-            self.needs_you(a, GEMINI_ASKS)
-        return False
 
     async def leave_copy_mode(self, target: str) -> None:
         """A scroll during transport can leave tmux in copy mode, where keys only move
@@ -4660,7 +4518,7 @@ class Session:
 
     async def end_panes(self, *where: str) -> None:
         """End the programs in the panes that list-panes finds with where: TERM, and
-        KILL for those still there 3 seconds later (gemini ignores the hangup that
+        KILL for those still there 3 seconds later (a tool may ignore the hangup that
         kill-session sends)."""
         out = await self.tmux.run(
             "list-panes", *where, "-F", "#{pane_pid}\t#{pane_dead}", check=False
@@ -5470,7 +5328,6 @@ class PantheonApp(App):
             return
         token = object()
         s.attached, s.attach_token = name, token  # first, so restart() leaves it alone
-        a.may_answer = None  # you may change gemini's mode in its screen
         error: BaseException | None = None
         try:
             try:  # restart() kills an exited agent's session, and a server can die
@@ -5575,9 +5432,24 @@ class PantheonApp(App):
             s.close()
 
 
+def name_tmux_window(pane: str) -> bool:
+    """Name your tmux window "pantheon", which tmux would call uv, unless you named it.
+    Return whether it did, so the name can go back to tmux when pantheon quits."""
+    rc, out, _ = run_cmd(["tmux", "display", "-p", "-t", pane, "#{automatic-rename}"])
+    if rc != 0 or out.strip() != "1":
+        return False
+    return run_cmd(["tmux", "rename-window", "-t", pane, "pantheon"])[0] == 0
+
+
 def run_ui(cfg: dict, slug: str | None, yolo_flag: bool | None = None) -> int:
     app = PantheonApp(cfg, slug, yolo_flag)
-    app.run()
+    pane = os.environ.get("TMUX_PANE", "")
+    named = bool(pane) and name_tmux_window(pane)
+    try:
+        app.run()
+    finally:
+        if named:
+            run_cmd(["tmux", "set", "-w", "-t", pane, "automatic-rename", "on"])
     for s in app.sessions.values():
         if s.state != "ended" and s.live_agents() and not s.foreign:
             print(
@@ -5924,7 +5796,7 @@ def mode_description(mode: Mode) -> str:
         f"(default: {count_help(mode)}). Each multi agent has an instance for each of "
         "them, in that order, and each single agent takes the first, unless the "
         "scramble setting gives each agent a random order. SPEC is "
-        "TOOL[:MODEL][@EFFORT], where TOOL is claude, codex, gemini, or ollama. "
+        "TOOL[:MODEL][@EFFORT], where TOOL is claude, codex, agy, or ollama. "
         "pantheon agents MODE shows what it would pick here."
     )
     return "\n".join(lines) + "\n\n" + textwrap.fill(about, 80)
@@ -6165,7 +6037,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict]:
         help="one effort level, or default (default: show each)",
     )
     subs["tools"] = sub.add_parser(
-        "tools", help="show the claude, codex, gemini, and tmux found now"
+        "tools", help="show the claude, codex, agy, and tmux found now"
     )
     subs["update"] = sub.add_parser(
         "update", help="replace this program with the newest one on GitHub"
@@ -6270,8 +6142,8 @@ MODULE = sys.modules[__name__]  # for the patches
 
 
 def cmd_unit_tests(verbose: bool, patterns: list[str]) -> int:
-    """Run the unit tests below. Pantheon reads its home, and gemini's, once as it
-    loads, so a new pantheon runs them, with both in a new scratch dir."""
+    """Run the unit tests below. Pantheon reads its home once, as it loads, so a new
+    pantheon runs them, with its home in a new scratch dir."""
     scratch = os.environ.get("PANTHEON_UNIT_HOME", "")
     if not scratch or HOME != Path(scratch):
         with tempfile.TemporaryDirectory(prefix="pantheon-tests-") as scratch:
@@ -6280,7 +6152,6 @@ def cmd_unit_tests(verbose: bool, patterns: list[str]) -> int:
                 "PANTHEON_HOME": scratch,
                 "PANTHEON_UNIT_HOME": scratch,
             }
-            env["GEMINI_CLI_HOME"] = scratch  # so no test reads your gemini files
             argv = ["test", "unit", *(["-v"] if verbose else [])]
             argv += [x for p in patterns for x in ("-k", p)]
             cmd = [sys.executable, "-I", "-B", str(program_path()), *argv]
@@ -6570,166 +6441,6 @@ class KeyTest(unittest.TestCase):
             path.write_text(good.hex() + "\n")
 
 
-def gemini_screen(rows, width=80, above=(), below=()):
-    """A gemini screen as capture-pane shows it: the lines above, then a dialog in
-    gemini's round box, each row wrapped to fit as Ink wraps it, then the lines below
-    (gemini hides its input box under a dialog). A row that starts with "$ " is a
-    command, in a box of its own. Ink cuts the first line and the options to one line
-    with "…". Drawn from gemini 0.66's code, not taken from a live pane."""
-    inner = width - 4
-    out = [*above, "╭" + "─" * (width - 2) + "╮"]
-    for row in rows:
-        if row.startswith("$ "):
-            out.append("│ ╭" + "─" * (inner - 2) + "╮ │")
-            for part in textwrap.wrap(row[2:], inner - 4):
-                out.append("│ │ " + part.ljust(inner - 4) + " │ │")
-            out.append("│ ╰" + "─" * (inner - 2) + "╯ │")
-            continue
-        one_line = row.startswith("? ") or row[2:4] in ("1.", "2.", "3.")
-        if one_line and len(row) > inner:
-            row = row[: inner - 1] + "…"
-        for part in textwrap.wrap(row, inner) or [""]:
-            out.append("│ " + part.ljust(inner) + " │")
-    out += ["╰" + "─" * (width - 2) + "╯", *below]
-    return "\n".join(out)
-
-
-def side_by_side(left, right, width=80):
-    """Two warnings as gemini draws them: in one row, each wrapped to half of it."""
-    half = (width - 4) // 2
-    cols = [
-        [p for r in w for p in textwrap.wrap(r, half) or [""]] for w in (left, right)
-    ]
-    n = max(map(len, cols))
-    left, right = (c + [""] * (n - len(c)) for c in cols)
-    return [a.ljust(half) + b for a, b in zip(left, right)]
-
-
-FLAGS_WARNING = [
-    "⚠  ⚠️ CRITICAL SECURITY WARNING: Untrusted Command Flags Detected",
-    "   The following flags/arguments were sourced from external untrusted input "
-    "(e.g., Buganizer ticket, external document):",
-    "     • /Users/me/notes.md",
-    "   Executing commands with flags sourced from untrusted input can execute "
-    "arbitrary code on your machine.",
-    "   Carefully verify these flags before approving.",
-]
-BUILD_WARNING = [
-    "⚠  ⚠️ CAUTION: Build Configuration Was Recently Modified",
-    "   Build file(s) (package.json) were modified earlier in this session. Running "
-    "'npm' will execute the updated build definitions.",
-    "   Ensure you trust all modifications made to build files before approving "
-    "execution.",
-]
-EXEC_OPTIONS = ["● 1. Allow once", "  2. No, suggest changes (esc)"]
-ASK_DIALOG = ["? Ask User", "Which branch?", "", "● 1. main", "  2. dev"]
-INPUT_BOX = " >   Type your message or @path/to/file"
-
-
-def exec_dialog(command, warnings, counter=""):
-    header = f"? Shell  {command}" + (f"    {counter}" if counter else "")
-    question = ["", "Allow execution of [Shell]?", ""]
-    return [header, f"$ {command}", "", *warnings, *question, *EXEC_OPTIONS]
-
-
-class GeminiDialogTest(unittest.TestCase):
-    def held(self, rows, **kw):
-        return held_dialog(gemini_screen(rows, **kw))
-
-    def test_untrusted_flags(self):
-        text = self.held(exec_dialog("cat /Users/me/notes.md", FLAGS_WARNING))
-        self.assertTrue(text.startswith("?Shellcat/Users/me/notes.md"), text)
-        self.assertTrue(text.endswith("●1.Allowonce2.No,suggestchanges(esc)"), text)
-
-    def test_a_build_command_after_a_build_file_changed(self):
-        self.assertTrue(self.held(exec_dialog("npm test", BUILD_WARNING)))
-
-    def test_two_warnings_side_by_side(self):
-        rows = side_by_side(FLAGS_WARNING, BUILD_WARNING)
-        self.assertTrue(any("CRITICAL" in r and "CAUTION:" in r for r in rows))
-        self.assertTrue(self.held(exec_dialog("cd /w && npm test", rows)))
-
-    def test_a_change_to_a_build_file(self):
-        rows = [
-            '? Edit  package.json: "test": "jest" => "test": "vitest"',
-            '$ 12 -   "test": "jest" 12 +   "test": "vitest"',
-            "",
-            "⚠  ⚠️ CRITICAL SECURITY WARNING: Build File Modification",
-            "   Target: package.json",
-            "   Modifying build configuration files can introduce malicious rules, "
-            "test runners, or dependency hooks that execute arbitrary code during "
-            "subsequent commands (e.g., blaze test, npm test, make).",
-            "   Inspect every line of the change below carefully before approving.",
-            "",
-            "Apply this change?",
-            "",
-            "● 1. Allow once",
-            "  2. Modify with external editor",
-            "  3. No, suggest changes (esc)",
-        ]
-        self.assertTrue(self.held(rows).startswith("?Editpackage.json"))
-
-    def test_a_narrow_pane(self):
-        rows = exec_dialog("cat /Users/me/notes.md", FLAGS_WARNING)
-        screen = gemini_screen(rows, width=40)  # pantheon's narrowest
-        self.assertNotIn("WARNING: Untrusted", screen)  # the heading wraps
-        self.assertTrue(held_dialog(screen))
-        # Narrower, gemini cuts the options short, and the dialog needs you.
-        self.assertEqual(self.held(rows, width=33), "")
-
-    def test_with_another_option_chosen(self):
-        rows = exec_dialog("cat /Users/me/notes.md", FLAGS_WARNING)
-        rows[-2:] = ["  1. Allow once", "● 2. No, suggest changes (esc)"]
-        self.assertTrue(self.held(rows))
-
-    def test_the_text_tells_dialogs_apart(self):
-        one = self.held(exec_dialog("cat /a.md", FLAGS_WARNING, "1 of 2"))
-        two = self.held(exec_dialog("cat /a.md", FLAGS_WARNING, "2 of 2"))
-        other = self.held(exec_dialog("cat /b.md", FLAGS_WARNING))
-        self.assertEqual(len({one, two, other}), 3)
-        # Nor the pane's width, which a resize changes while it waits, unless the
-        # resize cuts its first line.
-        rows = exec_dialog("cat /a.md", FLAGS_WARNING, "1 of 2")
-        self.assertEqual(self.held(rows, width=120), one)
-
-    def test_other_dialogs_are_not_held(self):
-        plain = exec_dialog("ls -la", [])
-        plain[-2:] = [
-            "● 1. Allow once",
-            "  2. Allow for this session",
-            "  3. No, suggest changes (esc)",
-        ]
-        self.assertEqual(self.held(plain), "")  # from an ask rule of your own
-        self.assertEqual(self.held(exec_dialog("ls -la", [])), "")  # untrusted folder
-        url = ["⚠  **Warning:** Deceptive URL(s) detected:", "   https://example.com"]
-        self.assertEqual(self.held(exec_dialog("curl https://example.com", url)), "")
-        self.assertEqual(self.held(ASK_DIALOG), "")
-        self.assertEqual(held_dialog(INPUT_BOX), "")
-
-    def test_only_the_live_dialog_counts(self):
-        quoted = gemini_screen(exec_dialog("cat /a.md", FLAGS_WARNING)).splitlines()
-        self.assertEqual(self.held(ASK_DIALOG, above=quoted), "")
-        answer = ["Answer Questions", "Which branch?", "> Enter your response"]
-        self.assertEqual(self.held(answer, above=quoted), "")
-        # Or no dialog at all, as for a shell that waits for input.
-        self.assertEqual(held_dialog("\n".join([*quoted, INPUT_BOX])), "")
-        # Words that a command quotes are in its box, not in a warning.
-        quote = "echo 'Untrusted CAUTION: Modification'"
-        self.assertEqual(self.held(exec_dialog(quote, [])), "")
-        # A notice that gemini shows below a dialog is fine.
-        below = ["", "  Gemini CLI update available! 0.66.0 → 0.67.0"]
-        rows = exec_dialog("cat /a.md", FLAGS_WARNING)
-        self.assertTrue(self.held(rows, below=below))
-
-    def test_the_input_box_shows_yolo(self):
-        box = "│ {} Type your message or @path/to/file │"
-        self.assertTrue(gemini_yolo(box.format("*")))
-        self.assertFalse(gemini_yolo(box.format(">")))
-        self.assertIsNone(gemini_yolo(box.format("!")))  # its shell mode
-        self.assertIsNone(gemini_yolo("● 1. Allow once"))  # a dialog hides the box
-        self.assertFalse(gemini_yolo(box.format("*") + "\n" + box.format(">")))
-
-
 class RoomTest(unittest.TestCase):
     def test_every_header_lines_up(self):
         """A long entry's header comes after its ▶. A short entry's, and that of a line
@@ -6760,57 +6471,93 @@ class RoomTest(unittest.TestCase):
         self.assertEqual(len(set(columns)), 1, columns)
 
 
-def gemini_chat(native_id, records):
-    """A chat file as gemini keeps one for a session, in the tests' gemini home: its
-    first line, then a line for each record."""
-    folder = gemini_home() / "tmp" / "project" / "chats"
-    folder.mkdir(parents=True, exist_ok=True)
-    lines = [{"sessionId": native_id, "kind": "main"}, *records]
-    path = folder / f"session-2026-11-02T10-00-{native_id[:8]}.jsonl"
-    path.write_text("".join(json.dumps(r) + "\n" for r in lines))
+# agy's screens, as capture-pane showed them from agy 1.4.12: idle, mid-turn, and with
+# a permission prompt.
+RULE = "─" * 60
+AGY_IDLE = f"  OK\n{RULE}\n>\n{RULE}\n? for shortcuts{' ' * 40}Gemini 3.8 Flash · high"
+AGY_WORKING = (
+    f"⣾  Working...\n{RULE}\n>\n{RULE}\nesc to cancel{' ' * 40}Gemini 3.8 Flash · high"
+)
+AGY_TRUST = "\n".join(
+    [
+        "Accessing workspace:",
+        "/tmp/work",
+        "Do you trust the contents of this project?",
+        "Antigravity CLI requires permission to read, edit, and execute files here.",
+        "> Yes, I trust this folder",
+        "  No, exit",
+        "  ↑/↓ Navigate · enter Confirm",
+        f"{' ' * 60}Gemini 3.8 Flash · high",
+    ]
+)
+AGY_ASKS = "\n".join(
+    [
+        "> Create a file named hello.txt containing hi, using a shell command.",
+        '● Ran (echo "hi" > hello.txt) (ctrl+o to expand)',
+        "Command",
+        RULE,
+        "Requesting permission for:",
+        '   echo "hi" > hello.txt',
+        "Run this command?",
+        "> 1. Yes, run command",
+        "  2. Yes, and always allow in this conversation for commands that start with",
+        "  4. No, cancel",
+        "  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command",
+        f"esc to cancel{' ' * 40}Gemini 3.8 Flash · high",
+    ]
+)
 
 
-class GeminiChatTest(unittest.TestCase):
-    def test_the_last_message_of_the_turn(self):
-        gemini_chat(
-            "aaaaaaaa-1",
-            [
-                {"id": "1", "type": "user", "content": [{"text": "Your turn."}]},
-                {"id": "2", "type": "gemini", "content": "Let me look.", "model": "m"},
-                {"id": "3", "type": "user", "content": [{"text": "tool output"}]},
-                {"id": "4", "type": "gemini", "content": "Done.", "model": "m-2"},
-                {"$set": {"lastUpdated": "2026-11-02T10:01:00Z"}},
-                {"id": "5", "type": "info", "content": "a note of gemini's own"},
-            ],
+def agy_transcript(*records) -> str:
+    """A transcript as agy keeps one, in the tests' scratch home: one step a line."""
+    fd, path = tempfile.mkstemp(dir=HOME, suffix=".jsonl")
+    with os.fdopen(fd, "w") as f:
+        f.write("".join(json.dumps(r) + "\n" for r in records))
+    return path
+
+
+PROMPT = {
+    "type": "USER_INPUT",
+    "content": "<USER_REQUEST>\nYour turn.\n</USER_REQUEST>",
+}
+
+
+class AgyTest(unittest.TestCase):
+    def test_its_reply(self):
+        path = agy_transcript(
+            PROMPT,
+            {"type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command"}]},
+            {"type": "GENERIC", "status": "DONE", "content": "the tool's output"},
+            {"type": "PLANNER_RESPONSE", "content": FINE, "thinking": "..."},
         )
-        self.assertEqual(gemini_turn("aaaaaaaa-1"), ("m-2", "Done."))
+        self.assertEqual(agy_reply(path), FINE)
 
-    def test_a_turn_with_no_message(self):
-        gemini_chat(
-            "bbbbbbbb-1",
-            [
-                {"id": "1", "type": "gemini", "content": "Old news.", "model": "m"},
-                {"id": "2", "type": "user", "content": [{"text": "Your turn."}]},
-                {"id": "3", "type": "gemini", "content": "", "model": "auto-x"},
-            ],
-        )
-        self.assertEqual(gemini_turn("bbbbbbbb-1"), ("m", ""))
-        # Nor does the last turn's message count for a turn that failed before one.
-        gemini_chat(
-            "dddddddd-1",
-            [
-                {"id": "1", "type": "gemini", "content": "Old news.", "model": "m"},
-                {"id": "2", "type": "user", "content": [{"text": "Your turn."}]},
-            ],
-        )
-        self.assertEqual(gemini_turn("dddddddd-1"), ("m", ""))
-        self.assertEqual(gemini_turn("cccccccc-1"), ("", ""))  # no chat file
+    def test_a_turn_with_no_reply(self):
+        old = {"type": "PLANNER_RESPONSE", "content": "Old news."}
+        self.assertEqual(agy_reply(agy_transcript(old, PROMPT)), "")
+        self.assertEqual(agy_reply(str(HOME / "none.jsonl")), "")
 
-    def test_part_text(self):
-        parts = [{"text": "a"}, {"text": "thinking", "thought": True}, "b", {"x": 1}]
-        self.assertEqual(part_text(parts), "ab")
-        self.assertEqual(part_text({"text": "c"}), "c")
-        self.assertEqual(part_text(None), "")
+    def test_its_dialogs(self):
+        self.assertEqual(agy_asks(AGY_ASKS), 'permission: echo "hi" > hello.txt')
+        trust = "Do you trust the contents of this project?"
+        self.assertEqual(agy_asks(AGY_TRUST), trust)
+        self.assertEqual((agy_asks(AGY_IDLE), agy_asks(AGY_WORKING)), ("", ""))
+        # One that its history shows, with the input box under it, is gone.
+        self.assertEqual(agy_asks(AGY_ASKS + "\n" + AGY_IDLE), "")
+
+    def test_its_hooks(self):
+        spec = json.loads(agy_hooks())["pantheon"]
+        self.assertEqual(tuple(spec), AGY_HOOK_EVENTS)  # never PreToolUse
+        self.assertEqual(spec["PostToolUse"][0]["matcher"], "*")
+        stop = spec["Stop"][0]["command"]
+        self.assertIn(" Stop 2>/dev/null || true", stop)
+        self.assertTrue(stop.endswith("; echo '{}'"))
+
+    def test_its_pastes(self):
+        self.assertFalse(collapses("agy", "row\n" * 6))  # its lines do not count
+        self.assertTrue(collapses("agy", "x" * 1001))
+        for shown in ("[Pasted text #1 1001 chars]", "[Pasted text #2 +31 lines]"):
+            self.assertTrue(paste_shown("agy", "> ", "> " + shown, "x" * 1001), shown)
 
 
 class SessionCase(unittest.TestCase):
@@ -7139,21 +6886,31 @@ class SessionTest(SessionCase):
 
     def test_resolve_roster(self):
         roster, picks, _ = resolve_roster({}, "develop", "", ["developer=codex"])
-        self.assertEqual([r[0] for r in roster if r[4]], ["claude", "codex", "gemini"])
+        self.assertEqual([r[0] for r in roster if r[4]], ["claude", "codex", "agy"])
         self.assertEqual(picks, {"developer": "codex"})
         with self.assertRaises(PrepError):
             resolve_roster({}, "develop", "", ["reviewer=codex"])
         with self.assertRaises(PrepError):  # codex has no such effort
             resolve_roster({}, "develop", "codex@huge", [])
-        _, _, notes = resolve_roster({}, "develop", "gemini@high", [])
-        ignored = "gemini takes effort only through its model, so @high is ignored"
-        self.assertIn(ignored, notes)
+
+    def test_agy_takes_effort_only_for_its_gemini_models(self):
+        roster, _, notes = resolve_roster({}, "develop", "agy@high", [])
+        self.assertEqual((roster[0][3], notes), ("high", []))
+        with self.assertRaises(PrepError):  # its gemini models stop at high
+            resolve_roster({}, "develop", "agy@max", [])
+        roster, _, notes = resolve_roster({}, "develop", "agy:claude-opus-4-6@low", [])
+        self.assertEqual(roster[0][3], "")
+        self.assertIn("so @low is ignored for claude-opus-4-6", notes[0])
+        # A level's effort goes quietly; and a model that names its level takes none.
+        spec = "agy:gemini-3.8-flash-low"
+        roster, _, notes = resolve_roster({}, "develop", spec, [], "high")
+        self.assertEqual((roster[0][2:4], notes), (("gemini-3.8-flash-low", ""), []))
 
     def test_a_mode_takes_every_tool_that_can_run(self):
         # Here every tool can run (setUp), but ollama only with a model.
         for mode in ("bakeoff", "develop"):
             roster, _, notes = resolve_roster({}, mode, "", [])
-            self.assertEqual([r[1] for r in roster], ["claude", "codex", "gemini"])
+            self.assertEqual([r[1] for r in roster], ["claude", "codex", "agy"])
             self.assertIn("ollama: no ollama_model is set", notes[0])
         cfg = {"ollama_model": "qwen3:8b"}
         roster, _, _ = resolve_roster(cfg, "bakeoff", "", [])
@@ -7437,135 +7194,94 @@ class BakeoffTest(SessionCase):
         )
 
 
-class GeminiYoloTest(SessionCase):
-    """A gemini agent in a yolo session, mid-turn, whose input box showed yolo. Not
-    poll_panes or gemini_asks, which need tmux."""
+class AgySessionTest(SessionCase):
+    """An agy agent in its check step, typed in, as its hooks and screen tell it."""
 
-    AGENTS, YOLO = "gemini", True
-    HAND = "✋  Action Required (x)"
+    AGENTS = "agy"
 
     def setUp(self):
         super().setUp()
         self.a = self.s.agent_for("checker", 0)
-        self.s.save_agent(self.a, state="working")
-        self.a.saw_work = True  # so no title starts a turn
-        self.a.may_answer = True
-        self.held = held_dialog(gemini_screen(exec_dialog("cat /a.md", FLAGS_WARNING)))
+        self.step = self.s.create_step("check", 0, 0, self.a)
+        self.give(self.step)
 
-    def notes(self):
-        return [t for t in self.room("note") if t == PROMPTS["held"]]
+    def hook(self, name, **fields):
+        ev = {"conversationId": "c-1", "modelName": "gemini-3.8-flash-high", **fields}
+        self.s.on_hook(self.a, {"hook_event_name": name, **ev})
 
-    def test_one_allow_for_each_dialog(self):
-        self.assertTrue(self.s.allow_held(self.a, self.held, 100))
-        self.assertFalse(self.s.allow_held(self.a, self.held, 100.5))  # its old screen
-        self.assertEqual(self.a.state, "working")
-        self.assertEqual(len(self.notes()), 1)
+    def start_turn(self):
+        self.hook("SessionStart")
+        self.hook("PreInvocation", invocationNum=0, lastUserInput="Pantheon step 1")
 
-    def test_one_note_for_each_run(self):
-        other = held_dialog(gemini_screen(exec_dialog("cat /b.md", FLAGS_WARNING)))
-        self.assertTrue(self.s.allow_held(self.a, self.held, 100))
-        self.assertTrue(self.s.allow_held(self.a, other, 100.5))
-        self.assertEqual(len(self.notes()), 1)
-        self.s.event("start", "", self.a)  # it starts again
-        self.assertTrue(self.s.allow_held(self.a, self.held, 101))
-        self.assertEqual(len(self.notes()), 2)
-
-    def test_never_while_you_are_in_its_screen(self):
-        self.s.attached = self.a.name
-        self.assertFalse(self.s.allow_held(self.a, self.held, 100))
-        self.assertEqual((self.a.state, self.a.reason), ("needs_you", GEMINI_ASKS))
-
-    def test_never_unless_its_input_box_showed_yolo(self):
-        for seen in (None, False):  # not seen since it started or you were in; or not
-            self.a.may_answer = seen
-            self.s.save_agent(self.a, state="working")
-            self.assertFalse(self.s.allow_held(self.a, self.held, 100))
-            self.assertEqual(self.a.state, "needs_you")  # at once, with no wait
-
-    def test_a_dialog_that_needs_you_stays_so(self):
-        self.s.needs_you(self.a, GEMINI_ASKS)
-        self.s.on_title(self.a, self.HAND)  # as after a reopen
-        self.assertEqual(
-            (self.a.state, self.room("needs")), ("needs_you", [GEMINI_ASKS])
-        )
-
-    def test_a_dialog_that_stays_needs_you(self):
-        self.assertTrue(self.s.allow_held(self.a, self.held, 100))
-        self.assertFalse(self.s.allow_held(self.a, self.held, 100 + DIALOG_WAIT))
-        self.assertEqual((self.a.state, self.a.reason), ("needs_you", GEMINI_ASKS))
-        self.assertEqual(self.s.state, "needs_you")
-
-    def test_any_other_dialog_needs_you_after_the_wait(self):
-        self.assertFalse(self.s.allow_held(self.a, "", 100))
-        self.assertEqual((self.a.state, self.room("needs")), ("working", []))
-        self.assertFalse(self.s.allow_held(self.a, "", 100 + DIALOG_WAIT))
-        self.assertEqual((self.a.state, self.a.reason), ("needs_you", GEMINI_ASKS))
-        needs = self.s.db.execute("SELECT data FROM events WHERE kind = 'needs'")
-        self.assertFalse(json.loads(needs.fetchone()["data"])["typeable"])
-        # A held dialog that shows later is still answered, and the wait ends.
-        self.assertTrue(self.s.allow_held(self.a, self.held, 103))
-        self.assertEqual((self.a.state, self.s.state), ("working", "running"))
-
-    def test_a_new_title_is_a_new_dialog(self):
-        self.assertTrue(self.s.allow_held(self.a, self.held, 100))
-        self.s.on_title(self.a, "✦  Working… (x)")
-        self.assertEqual((self.a.asked, self.a.allowed), (0.0, ""))
-        self.s.on_title(self.a, self.HAND)
-        self.assertEqual(self.a.state, "working")  # pantheon looks first
-        self.assertTrue(self.s.allow_held(self.a, self.held, 101))
-
-
-class GeminiNoYoloTest(SessionCase):
-    AGENTS = "gemini"
-
-    def setUp(self):
-        super().setUp()
-        self.a = self.s.agent_for("checker", 0)
-        self.s.save_agent(self.a, state="working", native_id="eeeeeeee-1")
-        self.a.saw_work = True  # mid-turn
-
-    def test_a_hand_title_needs_you_at_once(self):
-        self.s.on_title(self.a, GeminiYoloTest.HAND)
-        self.assertEqual((self.a.state, self.a.reason), ("needs_you", GEMINI_ASKS))
-        self.assertEqual(self.room("needs"), [GEMINI_ASKS])
-
-    def test_its_chat_file_has_its_posts(self):
-        gemini_chat(
-            "eeeeeeee-1",
-            [
-                {"id": "1", "type": "user", "content": [{"text": "Hi."}]},
-                {"id": "2", "type": "gemini", "content": "Hi.\nPANTHEON[say]: hi all"},
-            ],
-        )
-        self.s.on_title(self.a, "◇  Ready (x)")  # its turn ended
-        self.assertEqual(self.a.state, "idle")
-        self.assertEqual(self.room("say"), ["hi all"])
-        self.assertEqual(self.room("note")[-1], "replied:\nHi.")
-
-    def finish_check(self):
-        """Its check step, which its chat file says it finished."""
-        step = self.s.create_step("check", 0, 0, self.a)
-        self.give(step)
-        gemini_chat(
-            "eeeeeeee-1",
-            [
-                {"id": "1", "type": "user", "content": [{"text": "Your turn."}]},
-                {"id": "2", "type": "gemini", "content": FINE},
-            ],
-        )
-        return step
-
-    def test_its_chat_file_has_its_report(self):
-        step = self.finish_check()
-        self.s.on_title(self.a, "◇  Ready (x)")
-        done = self.s.step(step["id"])
+    def test_a_turn(self):
+        self.start_turn()
+        self.assertEqual((self.a.native_id, self.a.state), ("c-1", "working"))
+        self.assertIn("runs gemini-3.8-flash-high", self.room("ran"))
+        path = agy_transcript(PROMPT, {"type": "PLANNER_RESPONSE", "content": FINE})
+        self.hook("Stop", terminationReason="NO_TOOL_CALL", transcriptPath=path)
+        done = self.s.step(self.step["id"])
         self.assertEqual((done["status"], done["report"]), ("go", "Fine."))
+        self.assertEqual(self.a.state, "idle")
 
-    def test_an_exit_before_its_title_still_ends_its_turn(self):
-        step = self.finish_check()
-        self.s.exited(self.a, "0")
-        self.assertEqual(self.s.step(step["id"])["status"], "go")
-        self.assertEqual(self.s.state, "running")
+    def test_a_question_in_the_room(self):
+        self.start_turn()
+        reply = {"type": "PLANNER_RESPONSE", "content": "PANTHEON[say]: which branch?"}
+        self.hook("Stop", transcriptPath=agy_transcript(PROMPT, reply))
+        self.assertEqual(self.room("say"), ["which branch?"])
+        self.assertEqual((self.a.state, self.a.reason), ("idle", ROOM_WAIT))
+
+    def test_a_dialog_needs_you_until_it_goes(self):
+        self.start_turn()
+        self.s.on_agy_screen(self.a, AGY_ASKS, 100)
+        reason = 'permission: echo "hi" > hello.txt'
+        self.assertEqual((self.a.state, self.a.reason), ("needs_you", reason))
+        # agy runs on behind its trust prompt: its hooks keep the dialog's needs-you.
+        self.s.on_agy_screen(self.a, AGY_TRUST, 101)
+        self.hook("PostToolUse", toolCall={"name": "run_command"})
+        self.s.on_agy_screen(self.a, AGY_TRUST, 102)
+        self.assertEqual(self.a.state, "needs_you")
+        self.assertEqual(len(self.room("needs")), 2)  # one for each dialog
+        self.s.on_agy_screen(self.a, AGY_WORKING, 103)  # you answered it
+        self.assertEqual(self.a.state, "working")
+
+    def test_an_esc_ends_its_turn_with_no_stop(self):
+        self.start_turn()
+        self.s.on_agy_screen(self.a, AGY_IDLE, 100)
+        self.s.on_agy_screen(self.a, AGY_WORKING, 101)  # it went on
+        self.s.on_agy_screen(self.a, AGY_IDLE, 102)
+        self.assertEqual(self.a.state, "working")
+        self.s.on_agy_screen(self.a, AGY_IDLE, 102 + AGY_STOP_WAIT)
+        reason = "ended its turn with no PANTHEON[status]"
+        self.assertEqual((self.a.state, self.a.reason), ("needs_you", reason))
+        self.hook("Stop", terminationReason="USER_CANCELED")  # late: it counts not
+        self.assertEqual(self.s.step(self.step["id"])["status"], "open")
+
+    def test_an_error_needs_you(self):
+        self.start_turn()
+        self.hook("Stop", terminationReason="ERROR", error="quota exceeded")
+        self.assertEqual(self.a.reason, "error: quota exceeded")
+
+    def test_its_hook_command(self):
+        """The command in agy's hooks.json, run as agy runs it: sh -c, JSON in."""
+        command = json.loads(agy_hooks())["pantheon"]["Stop"][0]["command"]
+        env = {
+            **os.environ,
+            "PANTHEON_DB": db_uri(db_path(self.s.slug)),
+            "PANTHEON_AGENT": self.a.name,
+        }
+        out = subprocess.run(
+            ["sh", "-c", command],
+            input=b'{"conversationId": "c-1"}',
+            env=env,
+            capture_output=True,
+        )
+        self.assertEqual(out.stdout, b"{}\n")  # agy's "go on"
+        row = self.s.db.execute("SELECT agent, payload FROM hooks").fetchone()
+        payload = json.loads(row["payload"])
+        self.assertEqual(
+            (row["agent"], payload),
+            (self.a.name, {"conversationId": "c-1", "hook_event_name": "Stop"}),
+        )
 
 
 class SwitcherTest(SessionCase):
