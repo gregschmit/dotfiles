@@ -39,6 +39,20 @@ glab api -X POST "/projects/<id>/merge_requests/<iid>/discussions" \
 
 `discussions` starts a resolvable thread; use `/notes` for a plain comment. The header is required — without it glab sends no content-type and the API returns HTTP 415.
 
+### Attaching a file
+
+**gh** — the API has no upload endpoint for issue or PR attachments. Link to a committed file or a release asset instead.
+
+**glab** — upload through the per-project uploads API with curl, then paste the returned `markdown` field into the comment or description. `glab api --field "file=@…"` sends the file as a JSON string and fails with "file is invalid". Pipe the token in as a header so it stays out of argv, and use `--fail-with-body` so an HTTP error exits non-zero instead of saving the error JSON:
+
+```
+TOKEN=$(glab config get token --host <host>)   # --host, not -h: -h prints help text into the variable
+printf 'PRIVATE-TOKEN: %s\n' "$TOKEN" | curl --fail-with-body -sS -H @- \
+  --form "file=@shot.png" "https://<host>/api/v4/projects/<group>%2F<proj>/uploads"
+```
+
+The `markdown` value (`![shot](/uploads/<secret>/shot.png)`) only renders inside that project, so re-upload for each project you post in. SVGs do not render inline; convert to PNG first. To download someone else's attachment, GET `/api/v4/projects/<group>%2F<proj>/uploads/<secret>/<filename>` with the same header and `-fsS -o <filename>`; the web `/uploads/…` URL redirects to sign-in and the uploads list endpoint is 403 for non-maintainers.
+
 ### Inline suggested changes
 
 Both forges support suggestion blocks that reviewers accept in one click. The comment must anchor to a line that exists in the PR/MR's current head SHA on the server — if you merged primary locally without pushing, the position will be rejected.
