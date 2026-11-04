@@ -1,6 +1,6 @@
 ---
 name: rxg
-description: Background on RG Nets' rXg product - how it works, how to reach an rXg over SSH as $USER, how to get root, and how to sync code changes onto one. Read whenever a task involves the rxg source tree, an rXg or lab box, or the rgnets/rxg project on git.rgnets.com.
+description: What the rXg is and how to work on one over SSH. Read whenever a task involves the rxg source tree, an rXg or lab box, or rgnets/rxg on git.rgnets.com.
 ---
 
 # rXg

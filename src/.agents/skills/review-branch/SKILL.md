@@ -1,6 +1,6 @@
 ---
 name: review-branch
-description: Review a branch in a worktree - either a local branch against primary, or a PR/MR by number (checked out via the forge). Collects comments if a PR/MR exists, runs a full code review, and then either posts the review or works on the findings. Use when the user says "review this branch", "review PR N", "review MR N", or similar. For several at once, use review-branches instead.
+description: Review a local branch against primary, or a PR/MR by number. Use when the user says "review this branch", "review PR N", "review MR N", or similar. For several at once, use review-branches instead.
 ---
 
 # Review a branch

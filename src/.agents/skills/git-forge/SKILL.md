@@ -1,6 +1,6 @@
 ---
 name: git-forge
-description: Rules for detecting GitHub vs GitLab and invoking the right forge CLI. Read whenever the user asks about issues or PRs/MRs, and as a reference for other workflow skills.
+description: GitHub vs GitLab detection and the rules for gh and glab. Read whenever a task touches issues, PRs or MRs.
 ---
 
 # Git Forge

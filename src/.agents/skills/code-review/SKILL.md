@@ -1,6 +1,7 @@
 ---
 name: code-review
-description: Comprehensive technical review of code changes in a git repo, plus a suggested commit message. Modes - branch, changes. Optional focus hint after the mode.
+description: "Review code changes in a git repo and draft a commit message. Modes: branch (default) or changes, then an optional focus hint."
+argument-hint: "[branch|changes] [focus hint]"
 ---
 
 # Code Review Skill

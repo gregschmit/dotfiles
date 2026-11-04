@@ -1,6 +1,6 @@
 ---
 name: issue-to-branch
-description: Start work on a tracker issue - read it, branch from primary in a fresh worktree, make the changes, commit, and optionally open a PR/MR. Use when the user says "work on issue N", "start issue N", or similar.
+description: Start work on a tracker issue on a new branch, optionally ending in a PR/MR. Use when the user says "work on issue N", "start issue N", or similar.
 ---
 
 # Work an issue → branch (→ optional PR/MR)
