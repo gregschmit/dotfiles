@@ -15,7 +15,7 @@ Feel free to fork this repo and use for your own dotfiles.
   `~/git/dotfiles`. You can also track upstream to keep things up to date:
 
 ```sh
-git clone git@github.com/<username>/dotfiles
+git clone git@github.com:<username>/dotfiles
 cd dotfiles
 git remote add upstream https://github.com/gregschmit/dotfiles
 git fetch upstream
@@ -24,7 +24,7 @@ git fetch upstream
 - Run `./install` to install dotfiles.
 
 > [!WARNING]
-> `./install` deletes (`rm -rf`) each existing file or directory it replaces, including
-> `~/.claude`, `~/.codex`, `~/.gemini`, and `~/.agents` with everything in them. Back up anything
-> you want to keep first. See [CONTENTS.md](CONTENTS.md) for the full list and for how to take
+> `./install` deletes (`rm -rf`) each existing file or directory it replaces, including all of
+> `~/.agents` and your Claude Code skills in `~/.claude/skills`. Back up anything you want to keep
+> first. See [CONTENTS.md](CONTENTS.md) for the full list and for how to take
 > pieces one at a time.
