@@ -25,8 +25,8 @@ the symlink and stops; move anything you need out of the repo and run it again.
 >
 > It also replaces `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, `~/.zlogin`, `~/.bashrc`,
 > `~/.bash_profile`, `~/.profile`, `~/.tcshrc`, `~/.inputrc`, `~/.tmux.conf`, and `~/.vimrc`, and
-> it puts `Brewfile`, `chess`, and `ubuntu_pkgs.txt` in your home directory. Back up anything you
-> want to keep first, or take pieces one at a time (see the end of this file).
+> it puts `chess` in your home directory. Back up anything you want to keep first, or take pieces
+> one at a time (see the end of this file).
 
 The agent tools keep their runtime state (sessions, history, caches) in your home directory, not
 in this repo.
@@ -81,8 +81,6 @@ command; rename this `code-review` skill if you install both.
 
 | Path | What it is |
 | :--- | :--- |
-| `src/Brewfile` | Homebrew packages: core tools (git, vim, zsh, Alacritty), a few utilities, and libraries for Ruby projects. The forge CLIs and tmux come from mise. |
-| `src/ubuntu_pkgs.txt` | The same list for apt; the install command is in its first line. |
 | `src/chess/` | Chess positions (PGN and FEN). |
 
 ## Taking pieces one at a time

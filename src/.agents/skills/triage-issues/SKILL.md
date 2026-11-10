@@ -11,7 +11,7 @@ A batch wrapper around `triage-issue`, plus the comparison that one issue alone 
 
 If the user says `report`, or asks only to see existing triages, follow this section and skip §1 to §6. It evaluates nothing, starts no agents, posts nothing, and needs no worktree.
 
-Scan the 200 most recent open issues, unless the user asks for more. Run one script over them, so that only each issue's newest triage comment (see §2) reaches your context. Take the verdict, priority, difficulty, why, and date from that comment. Leave out issues with no triage.
+Scan the 200 most recent open issues, unless the user asks for more. Find their triages as §2 describes, and leave out issues with no triage.
 
 Print the table from End, sorted the same way, with the triage's date in place of posted or held. Under it, say how many issues you scanned, how many had a triage, and whether the limit left any out.
 
@@ -30,9 +30,14 @@ Print the resolved batch: number, title, labels, and why it is in the batch. If 
 
 ## 2. Account for the ones already triaged
 
-Find each issue's newest agent triage comment. It opens with the `🤖 **Agent Comment**` header (see AGENTS.md) and names the operation `triage-issue`. It is current when nobody has commented on or edited the issue since. Fetch only the fields this check needs, not whole threads.
+A triage comment holds the line `Agent Triage: #N` (see `triage-issue` §5). Find triage comments with one search, not by reading threads:
 
-Do not triage a current issue again. Take its properties from the comment for the final table.
+- **GitHub** — `gh search issues -R <owner>/<repo> --state open --match comments '"Agent Triage"' --json number`, then fetch the comments of those issues only.
+- **GitLab** — `glab api "projects/<id>/search?scope=notes&search=Agent%20Triage&per_page=100"`, paged, where `<id>` may be the URL-encoded path (`rgnets%2Frxg`). It returns the comments themselves, from issues and MRs alike.
+
+Do the rest in one script, so only its output reaches your context. Search matching is loose, so keep only comments on open issues that contain `Agent Triage: #`. Take the newest per issue, and print one row each: number, title, verdict, priority, difficulty, and why from the comment's table row, and the comment's date. A triage is current unless the issue was updated more than a minute after it.
+
+Do not triage a current issue again. Take its row for the final table.
 
 ## 3. Ask everything up front — one round, then no more questions
 
@@ -65,7 +70,7 @@ Read the results side by side. Do this before anything is posted, so that no com
 
 ## 6. Post
 
-Apply the §3 answers under the rules in `triage-issue` §6. Post each comment with the operation `triage-issue`, so §2 finds it on the next run.
+Apply the §3 answers under the rules in `triage-issue` §6. Post each comment with the operation `triage-issue`, in exactly the shape of `triage-issue` §5, so §2 finds it on the next run.
 
 ## End: report the table
 

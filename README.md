@@ -10,6 +10,7 @@ Feel free to fork this repo and use for your own dotfiles.
 
 ## Installation
 
+- Install git, Alacritty, VS Code, Vim, SQLite, and zsh.
 - If you're not me, you should fork this repo first to make your own personal adjustments.
 - Clone the repo somewhere. I always have a `~/git` directory, so I end up cloning to
   `~/git/dotfiles`. You can also track upstream to keep things up to date:

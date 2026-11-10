@@ -58,7 +58,7 @@ Print the triage in this shape. A human reads the top first, so write it for a t
 
 <details>
 
-<summary>Triage: #[number] - [commit] - [datestamp]</summary>
+<summary>Agent Triage: #[number] - [commit] - [datestamp]</summary>
 
 [what you found, with `path:line` citations; related issues; a suggested approach; open questions]
 
@@ -66,6 +66,8 @@ Print the triage in this shape. A human reads the top first, so write it for a t
 ```
 
 `[emoji]` is 🟢 for `ready`, 🟡 for `needs-info`, 🟠 for `duplicate`, 🔴 for `decline`, and 🟣 for `done`. `[commit]` is the short SHA of the primary you read, and `[datestamp]` is today's date as `YYYY-MM-DD`.
+
+Keep the table and the `Agent Triage:` line in exactly this shape: `triage-issues` finds triages by that line and reads the table row with a script.
 
 ## 6. Post — confirm first
 
