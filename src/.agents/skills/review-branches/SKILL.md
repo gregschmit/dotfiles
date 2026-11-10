@@ -1,7 +1,6 @@
 ---
 name: review-branches
-description: Review a batch of branches/PRs/MRs. Use when the user says "review my PRs", "review these branches", "review the pipeline-complete MRs", or similar. For a single target, use review-branch instead.
-disable-model-invocation: true
+description: Use when asked to review several branches, PRs, or MRs.
 ---
 
 # Review a batch of branches

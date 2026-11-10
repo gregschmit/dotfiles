@@ -1,6 +1,6 @@
 ---
 name: rxg
-description: What the rXg is and how to work on one over SSH. Read whenever a task involves the rxg source tree, an rXg or lab box, or rgnets/rxg on git.rgnets.com.
+description: What the rXg is and how to work on one over SSH. Read whenever a task involves the rxg source tree, an rXg or lab box, or rgnets/rxg.
 ---
 
 # rXg

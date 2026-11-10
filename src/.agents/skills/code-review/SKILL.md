@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: "Review code changes in a git repo and draft a commit message. Modes: branch (default) or changes, then an optional focus hint."
+description: Use when asked to review code changes.
 argument-hint: "[branch|changes] [focus hint]"
 ---
 
@@ -13,7 +13,7 @@ Perform a comprehensive technical review of code changes in this git repository,
 Parse `$1` as the mode; remaining tokens in `$ARGUMENTS` are an optional focus hint.
 
 - `branch` / empty / unrecognized → diff the current branch against the repo's primary branch. If already on primary and the focus hint doesn't explain what to look at, then stop - nothing to review.
-- `changes` → all working-tree changes vs. `HEAD`.
+- `changes` → all working-tree changes vs. `HEAD`, untracked files included. Skip `./CODE_REVIEW.md`, this skill's own output.
 
 If `$1` is unrecognized, treat all of `$ARGUMENTS` as the focus hint. If the diff is empty, say so and stop.
 

@@ -1,6 +1,6 @@
 ---
 name: rgnets
-description: "General facts about RG Nets: the in-house GitLab, main projects, web properties. Read whenever a task mentions RG Nets, git.rgnets.com, or an rgnets/* project."
+description: General facts about RG Nets. Read whenever a task mentions RG Nets, git.rgnets.com, or an rgnets/* project.
 ---
 
 # RG Nets

@@ -1,6 +1,6 @@
 ---
 name: review-branch
-description: Review a local branch against primary, or a PR/MR by number. Use when the user says "review this branch", "review PR N", "review MR N", or similar. For several at once, use review-branches instead.
+description: Review a branch in a worktree, often with PR/MR context. Use when asked to review one branch, PR, or MR.
 ---
 
 # Review a branch
@@ -51,8 +51,8 @@ Decide from the user's prompt — don't ask. Post the review by default. Fix the
 
 Print the worktree path, the review file, and the summary row the review landed on, e.g.
 
-    Worktree:   /tmp/agent-worktrees/rgnets/rxg/feature/new-thing
-    Review:     /tmp/agent-worktrees/rgnets/rxg/feature/new-thing/CODE_REVIEW.md
+    Worktree:   ~/git/rgnets/rxg.worktrees/feature/new-thing
+    Review:     ~/git/rgnets/rxg.worktrees/feature/new-thing/CODE_REVIEW.md
     Confidence: High
     Difficulty: Trivial
     Findings:   0 blocking / 2 should-fix / 3 nits

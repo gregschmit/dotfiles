@@ -1,6 +1,6 @@
 ---
 name: git-forge
-description: GitHub vs GitLab detection and the rules for gh and glab. Read whenever a task touches issues, PRs or MRs.
+description: How to use glab and gh. Read whenever a task touches issues, PRs or MRs.
 ---
 
 # Git Forge

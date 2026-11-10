@@ -35,22 +35,12 @@ in this repo.
 
 | Path | What it is |
 | :--- | :--- |
-| `src/.agents/AGENTS.md` | Shared agent instructions: coding guidelines, database migration rules, commit message style, a worktree convention (`/tmp/agent-worktrees/<owner/repo>/<branch>`), and a required attribution header for agent comments on GitHub and GitLab. `src/.claude/CLAUDE.md`, `src/.codex/AGENTS.md`, and `src/.gemini/AGENTS.md` are symlinks to it. |
+| `src/.agents/AGENTS.md` | Shared agent instructions: coding guidelines, database migration rules, commit message style, a worktree convention (`<project>.worktrees/<branch>`, beside the main checkout), and a required attribution header for everything an agent posts or sends, above all on GitHub and GitLab. `src/.claude/CLAUDE.md`, `src/.codex/AGENTS.md`, and `src/.gemini/AGENTS.md` are symlinks to it. |
 | `src/.agents/skills/` | Skills, shared with Claude through the `src/.claude/skills` symlink and with Antigravity through `src/.gemini/config/skills`. A `synced` subdirectory is ignored. |
 | `src/.claude/settings.json` | Claude Code settings: permission allow rules, Opus at `xhigh` effort, theme, fullscreen TUI. It also skips the dangerous-mode permission prompt. |
 | `src/.gemini/` | For the Antigravity CLI (`agy`), which reads `~/.gemini`: only the `AGENTS.md` and `config/skills` links. |
 
 ### Skills
-
-| Skill | What it does |
-| :--- | :--- |
-| `git-forge` | Picks `gh` (github.com) or `glab` (any other host) from the origin remote, and always passes `--repo` to `glab` so it never falls back to gitlab.com. Has working recipes for collecting all comments, posting multi-line comments with `glab api`, and inline suggestion blocks on both forges. The other skills use it. |
-| `code-review` | Reviews the branch against primary (`branch`) or the working tree against `HEAD` (`changes`). Writes `CODE_REVIEW.md` with a verdict, a confidence and difficulty rating, findings grouped as Blocking, Should fix, and Nits, and a suggested commit message. Uses `shortcode` for finding IDs. |
-| `review-branch` | Reviews one local branch or PR/MR in a worktree: collects comments, optionally merges primary, runs `code-review`, then posts the review or fixes the findings. |
-| `review-branches` | Reviews a batch (`mine`, explicit branches or PR/MR numbers, or the `llm::pipeline-complete` label). Asks all questions up front, then runs one agent per target and reports a table. |
-| `issue-to-branch` | Reads an issue, branches in a worktree, does the work, and asks before it commits, pushes, or opens a draft PR/MR. |
-| `rgnets` | Background on RG Nets: the in-house GitLab, main projects, and web properties. Specific to the author's work. |
-| `rxg` | What the rXg is and how to work on one over SSH. Specific to the author's work. |
 
 The skills depend on the worktree convention and attribution header in `AGENTS.md` and on the
 `shortcode` script. Take them together. Note that Claude Code has a built-in `/code-review`

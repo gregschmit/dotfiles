@@ -20,8 +20,8 @@
 
 ## Worktrees
 
-Agent worktrees live under `/tmp/agent-worktrees/<origin-path>/<branch>`, where `<origin-path>` is the owner/repo path from the origin remote (e.g. `gregschmit/dotfiles`, `rgnets/rxg`) and `<branch>` may itself contain slashes:
-- Only create a worktree if your skill or task demands one. Skills that use them (`issue-to-branch`, `review-branch`, `review-branches`) print the worktree path when they finish.
+Agent worktrees live under `<project>.worktrees/<branch>`, beside the main checkout, so `~/git/rgnets/rxg` keeps them in `~/git/rgnets/rxg.worktrees`. Find `<project>` with `dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`, because `--show-toplevel` gives the worktree when you are inside one. `<branch>` may itself contain slashes:
+- Only create a worktree if your skill or task demands one. Skills that use them print the worktree path when they finish.
 - If you're already in a worktree and it matches what the user asked for, stay there; otherwise create a new one per the convention below.
 - When you would create a worktree at a path that already exists, ask reuse / recreate / abort — do not silently overwrite.
 - Worktrees persist across runs so their outputs (edits, `CODE_REVIEW.md`) remain reachable. When you're done, ask the user if you should clean up the worktree with `git worktree remove <path>`.
@@ -31,7 +31,7 @@ Agent worktrees live under `/tmp/agent-worktrees/<origin-path>/<branch>`, where 
 
 ## Comment Attribution
 
-Every comment an agent posts to GitHub or GitLab (top-level, review, inline suggestion, follow-up) MUST start with this attribution header:
+Everything an agent posts or sends MUST start with this attribution header. Above all, that means every comment on GitHub or GitLab (even inline suggestions), but it also covers emails, comments on other websites, and any other posting of any kind:
 
 ```
 🤖 **Agent Comment** · [model] · [effort] · [operation]
