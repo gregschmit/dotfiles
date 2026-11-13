@@ -2,12 +2,14 @@
 
 ## Software Development Guidelines
 
+- Git repos are generally expected to be stored in `~/git`.
 - Check for a project README.md to orient yourself.
 - Avoid duplication, but prefer simple duplication over complex DRY abstractions.
 - Write code that is easy to understand and maintain.
 - Return early to avoid deep nesting.
 - Favor composition over inheritance.
 - Write data-oriented code: think carefully about your data types.
+- Favor using language/framework tools rather than hand writing, when practical (e.g., prefer `rails g migration` to creating the file and timestamp manually).
 - In database migrations:
   - Use foreign key constraints for referential integrity; always explicitly specify ON DELETE behavior (CASCADE, SET NULL, RESTRICT, etc.).
   - Join tables should almost always have a composite index with a uniqueness constraint.
@@ -23,24 +25,24 @@
 Agent worktrees live under `<project>.worktrees/<branch>`, beside the main checkout, so `~/git/rgnets/rxg` keeps them in `~/git/rgnets/rxg.worktrees`. Find `<project>` with `dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`, because `--show-toplevel` gives the worktree when you are inside one. `<branch>` may itself contain slashes:
 - Only create a worktree if your skill or task demands one. Skills that use them print the worktree path when they finish.
 - If you're already in a worktree and it matches what the user asked for, stay there; otherwise create a new one per the convention below.
-- When you would create a worktree at a path that already exists, ask reuse / recreate / abort — do not silently overwrite.
 - Worktrees persist across runs so their outputs (edits, `CODE_REVIEW.md`) remain reachable. When you're done, ask the user if you should clean up the worktree with `git worktree remove <path>`.
 - New branch in a worktree: `git fetch origin`, then `git worktree add -b <branch> <path> origin/<primary>`.
 - Existing branch in a worktree: `git fetch origin`, `git worktree add <path> origin/<primary>`, `cd` in, `git pull`, then attach the target — `gh pr checkout N` / `glab mr checkout N --repo …` for PR/MR mode, or `git checkout <branch> && git pull` for a local branch.
 - New branches use `<$USER>/<short-kebab-slug>` — short and human-readable, e.g. `gns/fix-portal-devices-ui`. Always branch from primary unless told otherwise. Do not encode the issue number in the branch name.
 
-## Comment Attribution
+## Attribution
 
-Everything an agent posts or sends MUST start with this attribution header. Above all, that means every comment on GitHub or GitLab (even inline suggestions), but it also covers emails, comments on other websites, and any other posting of any kind:
+Everything an agent posts or sends MUST start with this attribution header. Above all, that means every issue, PR, MR, or comment on GitHub or GitLab (even inline suggestions), but it also covers emails, comments on other websites, and any other posting of any kind:
 
 ```
-🤖 **Agent Comment** · [model] · [effort] · [operation]
+🤖 **Agent** · [model] · [effort] · [operation]
 
 ---
 
 [content]
 ```
 
-- `[model]` — e.g. `Claude Opus 5.5 (1M)`. Emit what you know (ideally name, full version, and context window); omit information you can't confirm rather than guess.
-- `[effort]` — e.g. `high`, `fast`. Omit if unknown.
+Emit what you know; don't guess:
+- `[model]` — ideally include tool/model name, full version, and context window, e.g. `Claude Opus 5.5 (1M)`.
+- `[effort]` — e.g. `high`, `fast`.
 - `[operation]` — primary active skill and/or action; e.g.: `review-branch summary`, `review-branch inline-suggestion`.

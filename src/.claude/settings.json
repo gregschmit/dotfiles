@@ -19,6 +19,9 @@
     },
     "claude-fable-5-1": {
       "effortLevel": "xhigh"
+    },
+    "claude-fable-5-2": {
+      "effortLevel": "xhigh"
     }
   },
   "tui": "fullscreen",
