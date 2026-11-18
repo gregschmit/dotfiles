@@ -55,7 +55,7 @@ The `markdown` value (`![shot](/uploads/<secret>/shot.png)`) only renders inside
 
 ### Inline suggested changes
 
-Both forges support suggestion blocks that reviewers accept in one click. The comment must anchor to a line that exists in the PR/MR's current head SHA on the server — if you merged primary locally without pushing, the position will be rejected.
+Both forges support suggestion blocks that reviewers accept in one click. The comment must anchor to a line that exists in the PR/MR's current head SHA on the server — if you merged the base branch locally without pushing, the position will be rejected.
 
 **gh** — POST to `/repos/{owner}/{repo}/pulls/{N}/reviews` with `event: "COMMENT"` and a `comments` array; each entry has `path`, `line` (or `start_line`+`line` for a range), `side: "RIGHT"`, and a body containing a fenced suggestion block:
 

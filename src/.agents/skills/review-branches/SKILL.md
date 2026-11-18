@@ -24,33 +24,29 @@ Print the resolved batch before going further: number (if any), title, author, d
 
 ## 2. Account for the ones already reviewed
 
-For each target that has a PR/MR, find the newest agent review comment — the ones that open with the `🤖 **Agent Comment**` attribution header (see AGENTS.md). Its `<summary>` line carries the commit it reviewed. The review is still current when that commit is the current head or the only commit afterwards is the primary branch being merged in to keep it up to date: it already describes the code, so there is nothing to redo.
+Run the `review-branch` §3 check on each target from the main clone, with the branch's head in place of `HEAD`. For a branch with no PR/MR, read the review from its worktree, if one exists.
 
-For current targets, don't perform another review, just keep it for the final report.
+Launch no agent for a target with a current review, unless the user specifically asked for a re-review. Keep its review for the final report.
 
-Branches with no PR/MR have nothing on the server to check, so they always get reviewed.
+## 3. Confirm the batch — one round, then no more questions
 
-## 3. Ask everything up front — one round, then no more questions
+The whole point is that the parallel agents never stop to ask. These are the defaults for every target. The user's prompt or answer can override any of them:
 
-The whole point is that the parallel agents never stop to ask. Get every `review-branch` decision answered before you launch anything:
+- **Merge the base branch in and push the merge commit.** The base is what the PR/MR merges into, or primary for a bare branch.
+- **Post the review** to the PR/MR. Targets with no PR/MR hold it in the worktree. Add inline suggestions only when the user asks.
 
-- **Which ones** — all of §1, or a subset. Drafts are the usual exclusion. This is also where the user can add a target the mode didn't pick up, or drop one §2 flagged as already reviewed.
-- **Merge primary in** — yes/no. If yes, **push the merge commit** — yes/no. Inline suggestions need both to be yes.
-- **What to do with each review** — hold it in the worktree, post it to the PR/MR, or post it with inline suggestions where findings map cleanly to a single hunk. Targets with no PR/MR can only be held; say so rather than asking again per target.
-- **Worktree collisions** — reuse / recreate / skip, applied to every path that already exists.
+Print the defaults under the batch and ask one question: which ones — all of §1, or a subset. Drafts are the usual exclusion. In the same answer the user can add a target the mode didn't pick up, ask for a re-review of one §2 found current, or change a default. Skip the question when the user named the targets.
 
 Fixing findings is not on the menu here. Unattended commits across many branches is a bad trade — rerun `review-branch` on the ones worth fixing.
-
-Do not launch until all four are answered.
 
 ## 4. Fan out — one agent per target
 
 Run `git fetch origin` once in the main clone first, so the agents don't fight over the lock.
 
-Launch the agents in a single message so they run concurrently. Cap it around ten at a time and queue the rest. Give each agent one target (a PR/MR number or a branch name), the §3 answers verbatim, and these rules:
+Launch the agents in a single message so they run concurrently. Cap it around ten at a time and queue the rest. Give each agent one target (a PR/MR number or a branch name), the §3 settings (defaults plus any overrides), and these rules:
 
 - Follow the `review-branch` skill end to end.
-- The §3 answers are the user's answers — never prompt. Anything they don't cover, take the conservative path (skip the step, post nothing) and report it.
+- The §3 settings are the user's answers — never prompt. Anything they don't cover, take the conservative path (skip the step, post nothing) and report it.
 - Work only inside your own worktree. The path is keyed on the branch, so no two agents share one. Never touch another worktree or the main clone.
 - `git worktree add` serializes on the main clone's lock. Retry once on a lock error.
 - If this is a branch labeled `llm::pipeline-complete`, then if there are any blocking findings, the label should be removed and a new label `llm::ready-to-implement` should be added.

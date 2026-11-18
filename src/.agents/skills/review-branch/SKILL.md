@@ -9,10 +9,10 @@ Follow `git-forge` for CLI choice and the glab `--repo` rule.
 
 ## 1. Prepare a worktree, if not already inside one
 
-Determine the target branch:
+Determine the branch to review and its base, the branch it merges into (GitLab calls it the target branch):
 
-- PR/MR mode: query the forge (`gh pr view N --json headRefName -q .headRefName`, or the glab equivalent with `--repo`).
-- Local mode: use the branch the user provides.
+- PR/MR mode: query the forge (`gh pr view N --json headRefName,baseRefName`, or `source_branch` and `target_branch` from the glab equivalent with `--repo`).
+- Local mode: use the branch the user provides. Its base is primary.
 
 Follow the AGENTS.md worktree convention (existing branch). If git refuses because the branch is checked out elsewhere — rare, only if the main clone happens to sit on it — surface the error and ask the user what to do.
 
@@ -22,29 +22,35 @@ Follow the AGENTS.md worktree convention (existing branch). If git refuses becau
 
 Get title, description, and every comment/thread — top-level and inline. See `git-forge` for why the API subcommands beat `view --comments` when completeness matters. Note unresolved threads separately.
 
-## 3. Merge primary — ask first
+## 3. Check for a current review
 
-Ask the user whether to merge the primary branch in to surface conflicts/drift, and whether to push the merge commit. If yes:
+Find the newest review. On a PR/MR, it is the newest comment that opens with the `🤖 **Agent` header and holds a `Code Review:` summary line. With no PR/MR, it is `./CODE_REVIEW.md` in a reused worktree. The summary line names the commit it reviewed.
+
+The review is current when no development commits came after that commit, so everything newer is a merge of the base: `git rev-list --no-merges <commit>..HEAD --not origin/<base>` prints nothing. A `+dirty` commit, or one a force push removed, is never current.
+
+If the review is current, skip §4 to §6 unless the user specifically asked for a re-review. Take that review to §7: post it if it exists only in the worktree and there is a PR/MR, or fix from it if asked.
+
+## 4. Merge the base and push
+
+Merge `origin/<base>` in to surface conflicts and drift, then push the merge commit. Skip the merge or the push only when the user says to.
 
 - Merge in the worktree. If it conflicts, try to resolve them yourself when the correct resolution is obvious from the code on both sides. Only stop and ask the user when the resolution requires a judgment call (semantic overlap, ambiguous intent, non-trivial logic clashes).
-- After a clean merge, push the merge commit up if requested. (This is the exception to the usual "don't touch someone else's branch" rule — the user asked for it.)
+- After a clean merge, push the merge commit. A branch with no remote has nothing to push. (This is the exception to the usual "don't touch someone else's branch" rule — the user wants it.)
 
-If no, skip.
+## 5. Assess the base's impact
 
-## 4. Assess primary's impact
+List files the base changed since the branch point and files this branch touches. For overlaps, say briefly whether the base's changes affect this work. Judgment call — spell out your reasoning; do not reduce it to a script.
 
-List files primary changed since the branch point and files this branch touches. For overlaps, say briefly whether primary's changes affect this work. Judgment call — spell out your reasoning; do not reduce it to a script.
+## 6. Run the code review
 
-## 5. Run the code review
+Invoke the `code-review` skill in `branch` mode against the base. It writes `./CODE_REVIEW.md` (inside the worktree) and includes a suggested squash-merge commit message. Do not push that message or edit the PR/MR description yourself — it's for the human to copy into the squash box.
 
-Invoke the `code-review` skill in `branch` mode against the current state. It writes `./CODE_REVIEW.md` (inside the worktree) and includes a suggested squash-merge commit message. Do not push that message or edit the PR/MR description yourself — it's for the human to copy into the squash box.
-
-## 6. Choose: post the review or fix the findings
+## 7. Choose: post the review or fix the findings
 
 Decide from the user's prompt — don't ask. Post the review by default. Fix the findings only when the user specifically asks for fixes, and leave the review in the worktree if they say not to post.
 
 - **Post the review** — top-level comment or review submission, whichever fits. Post the full code-review output as-is, preserving both `<details>` blocks (review and suggested commit message). With no PR/MR there is nowhere to post, so leave the review in the worktree.
-  - **Inline suggested changes** — only when the user specifically asks; don't offer them. They need PR/MR mode and a §3 merge of primary that merged cleanly and was pushed (otherwise inline anchors drift from the server-side head SHA and the API rejects the position). If that didn't happen, say so and post the review without them. Post each finding that maps to a single diff hunk as an inline suggestion — see `git-forge` for the gh/glab APIs. Skip findings that don't map cleanly.
+  - **Inline suggested changes** — only when the user specifically asks; don't offer them. They need PR/MR mode and a §4 merge that merged cleanly and was pushed (otherwise inline anchors drift from the server-side head SHA and the API rejects the position). If that didn't happen, say so and post the review without them. Post each finding that maps to a single diff hunk as an inline suggestion — see `git-forge` for the gh/glab APIs. Skip findings that don't map cleanly.
 - **Fix the findings** — work through Blocking and Should-fix items in the worktree, commit (confirm the message first), push, and if a PR/MR exists, post a short comment citing each finding's code to say what was addressed and what was intentionally left.
 
 ## End: report the worktree

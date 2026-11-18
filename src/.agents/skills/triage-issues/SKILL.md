@@ -11,7 +11,7 @@ A batch wrapper around `triage-issue`, plus the comparison that one issue alone 
 
 If the user says `report`, or asks only to see existing triages, follow this section and skip §1 to §6. It evaluates nothing, starts no agents, posts nothing, and needs no worktree.
 
-Scan the 200 most recent open issues, unless the user asks for more. Find their triages as §2 describes, and leave out issues with no triage.
+Scan the 200 most recent open issues, unless the user asks for more or a specific set of issues. Find their triages as §2 describes, and leave out issues with no triage.
 
 Print the table from End, sorted the same way, with the triage's date in place of posted or held. Under it, say how many issues you scanned, how many had a triage, and whether the limit left any out.
 
@@ -35,9 +35,9 @@ A triage comment holds the line `Agent Triage: #N` (see `triage-issue` §5). Fin
 - **GitHub** — `gh search issues -R <owner>/<repo> --state open --match comments '"Agent Triage"' --json number`, then fetch the comments of those issues only.
 - **GitLab** — `glab api "projects/<id>/search?scope=notes&search=Agent%20Triage&per_page=100"`, paged, where `<id>` may be the URL-encoded path (`rgnets%2Frxg`). It returns the comments themselves, from issues and MRs alike.
 
-Do the rest in one script, so only its output reaches your context. Search matching is loose, so keep only comments on open issues that contain `Agent Triage: #`. Take the newest per issue, and print one row each: number, title, verdict, priority, difficulty, and why from the comment's table row, and the comment's date. A triage is current unless the issue was updated more than a minute after it.
+Do the rest in one script, so only its output reaches your context. Search matching is loose, so keep only comments on open issues that contain `Agent Triage: #`. Take the newest per issue, and print one row each: number, title, verdict, priority, difficulty, and why from the comment's table row, and the comment's date. This row is used for the final table.
 
-Do not triage a current issue again. Take its row for the final table.
+A triage is always considered current unless explicitly invalidated by a re-triage. Re-triage should only occur if specifically requested by the user. If a re-triage is requested, ensure the triage comment is updated with the new triage and a note left explaining the reason for the re-triage.
 
 ## 3. Ask everything up front — one round, then no more questions
 
@@ -46,9 +46,8 @@ The parallel agents never stop to ask. Get every decision before you launch anyt
 - **Which ones** — all of §1 or a subset. This is also where the user can add an issue or drop one.
 - **What to do with each result** — hold it in the report, or post it as a comment.
 - **Labels** — none, unless the user names them here.
-- **Worktree** — reuse or recreate the triage worktree, if it already exists.
 
-Do not launch until all four are answered.
+Do not launch until all three are answered.
 
 ## 4. Fan out — one agent per issue
 
