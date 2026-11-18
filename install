@@ -2,6 +2,31 @@
 
 # Helper to install symlinks to `src` directory.
 
+# Files with my git identity, and the origin (any URL form) that may install them as they are.
+IDENTITY_FILES="src/.gitconfig src/.config/git/allowed_signers"
+IDENTITY_NAME="schmitgreg"
+OFFICIAL_REPO="github.com[:/]gregschmit/dotfiles"
+
+# Stop before any change if a fork still has my git identity, so it doesn't commit as me.
+check_identity() {
+  case "`git remote get-url origin 2>/dev/null`" in
+    *$OFFICIAL_REPO | *$OFFICIAL_REPO.git) return 0 ;;
+  esac
+
+  local f found=""
+  for f in $IDENTITY_FILES; do
+    if grep -qs "$IDENTITY_NAME" "$f"; then found="$found $f"; fi
+  done
+  if [ -z "$found" ]; then return 0; fi
+
+  echo "ERROR: This is not a clone of gregschmit/dotfiles, but these files still have the git"
+  echo "identity of its owner ($IDENTITY_NAME):"
+  for f in $found; do echo "  $f"; done
+  echo "Change them to match your setup (name, email, signing key), or delete them. Then run"
+  echo "./install again. Nothing was installed."
+  exit 1
+}
+
 # Remove any existing file/symlink at $2, then symlink $2 -> $1.
 install_symlink() {
   echo "Symlinking:  $2 -> $1"
@@ -81,4 +106,5 @@ install_dir() {
 # Ensure current directory is the script location.
 cd "`dirname "$0"`"
 
+check_identity
 install_dir ""
