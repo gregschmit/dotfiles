@@ -1,6 +1,6 @@
 #!/bin/sh -e
 
-ALL_TOOLS="antigravity claude codex mise ollama opencode rustup uv"
+ALL_TOOLS="antigravity claude codex mise opencode rustup uv"
 
 usage() {
   echo "Install one or more developer tools."
@@ -29,10 +29,6 @@ install_mise() {
   curl https://mise.run | sh
 }
 
-install_ollama() {
-  curl -fsSL https://ollama.com/install.sh | sh
-}
-
 install_opencode() {
   # `.commonenv` puts `~/.opencode/bin` on PATH; keep the installer out of `.zshrc`.
   curl -fsSL https://opencode.ai/v2/install | bash -s -- --no-modify-path
@@ -52,7 +48,6 @@ install_one() {
     claude) install_claude ;;
     codex) install_codex ;;
     mise) install_mise ;;
-    ollama) install_ollama ;;
     opencode) install_opencode ;;
     rustup) install_rustup ;;
     uv) install_uv ;;
