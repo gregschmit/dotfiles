@@ -31,6 +31,8 @@ install_herdr() {
 
 install_mise() {
   curl https://mise.run | sh
+  # The installer adds only mise; this adds the tools in its config.
+  "${MISE_INSTALL_PATH:-$HOME/.local/bin/mise}" install
 }
 
 install_opencode() {
