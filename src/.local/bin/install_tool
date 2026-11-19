@@ -1,6 +1,6 @@
 #!/bin/sh -e
 
-ALL_TOOLS="antigravity claude codex mise opencode rustup uv"
+ALL_TOOLS="antigravity claude codex herdr mise opencode rustup uv"
 
 usage() {
   echo "Install one or more developer tools."
@@ -25,6 +25,10 @@ install_codex() {
   curl -fsSL https://chatgpt.com/codex/install.sh | sh
 }
 
+install_herdr() {
+  curl -fsSL https://releases.herdr.dev/app/install.sh | sh
+}
+
 install_mise() {
   curl https://mise.run | sh
 }
@@ -47,6 +51,7 @@ install_one() {
     antigravity) install_antigravity ;;
     claude) install_claude ;;
     codex) install_codex ;;
+    herdr) install_herdr ;;
     mise) install_mise ;;
     opencode) install_opencode ;;
     rustup) install_rustup ;;
