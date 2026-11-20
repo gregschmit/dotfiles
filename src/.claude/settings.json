@@ -4,6 +4,7 @@
       "Read(~/.agents/**)",
       "Read(~/git/dotfiles)",
       "Bash(bin/rails *)",
+      "Bash(agy *)",
       "Bash(codex *)",
       "Bash(gemini *)",
       "Bash(git *)",
@@ -27,5 +28,6 @@
   "tui": "fullscreen",
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
-  "agentPushNotifEnabled": true
+  "agentPushNotifEnabled": true,
+  "switchModelsOnFlag": false
 }
