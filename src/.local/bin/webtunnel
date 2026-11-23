@@ -1,0 +1,29 @@
+#!/bin/sh -e
+
+usage() {
+  echo "Reach a web server on a private host through a public SSH host."
+  echo ""
+  echo "Usage: webtunnel <host>[:<port>] <jump> [<local-port>]"
+  echo ""
+  echo "Forwards localhost:<local-port> (default 8443) to <host>:<port> (default 443)."
+  echo "<jump> makes the connection, so only it must reach <host>. It is anything ssh"
+  echo "takes, such as user@host or an alias from ~/.ssh/config."
+  echo ""
+  echo "Example: webtunnel 172.30.75.94 gns@inf-sf.rgnets.net"
+  exit 1
+}
+
+if [ $# -lt 2 ] || [ $# -gt 3 ]; then
+  usage
+fi
+
+case "$1" in
+  *:*) host=${1%:*} port=${1##*:} ;;
+  *) host=$1 port=443 ;;
+esac
+jump=$2
+local_port=${3:-8443}
+
+echo "localhost:$local_port -> $host:$port via $jump (Ctrl-C to stop)"
+# Exit if the local port is taken, rather than hold a useless connection open.
+exec ssh -N -o ExitOnForwardFailure=yes -L "$local_port:$host:$port" "$jump"
