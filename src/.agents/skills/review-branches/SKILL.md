@@ -32,7 +32,7 @@ Launch no agent for a target with a current review, unless the user specifically
 
 The whole point is that the parallel agents never stop to ask. These are the defaults for every target. The user's prompt or answer can override any of them:
 
-- **Merge the base branch in and push the merge commit.** The base is what the PR/MR merges into, or primary for a bare branch.
+- **Merge the base branch in when `review-branch` §4 calls for it, and push the merge commit.** The base is what the PR/MR merges into, or primary for a bare branch.
 - **Post the review** to the PR/MR. Targets with no PR/MR hold it in the worktree. Add inline suggestions only when the user asks.
 
 Print the defaults under the batch and ask one question: which ones — all of §1, or a subset. Drafts are the usual exclusion. In the same answer the user can add a target the mode didn't pick up, ask for a re-review of one §2 found current, or change a default. Skip the question when the user named the targets.
