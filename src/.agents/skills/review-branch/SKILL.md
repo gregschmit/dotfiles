@@ -20,7 +20,7 @@ Follow the AGENTS.md worktree convention (existing branch). If git refuses becau
 
 ## 2. Fetch PR/MR state (PR/MR mode only)
 
-Get title, description, and every comment/thread — top-level and inline. See `git-forge` for why the API subcommands beat `view --comments` when completeness matters. Note unresolved threads separately.
+Get title, author, description, and every comment/thread — top-level and inline. See `git-forge` for why the API subcommands beat `view --comments` when completeness matters. Note unresolved threads separately.
 
 ## 3. Check for a current review
 
@@ -61,8 +61,9 @@ Decide from the user's prompt — don't ask. Post the review by default. Fix the
 
 ## End: report the worktree
 
-Print the worktree path, the review file, and the summary row the review landed on, e.g.
+Print the PR/MR author's username (leave out the line with no PR/MR), the worktree path, the review file, and the summary row the review landed on, e.g.
 
+    Author:     alice
     Worktree:   ~/git/rgnets/rxg.worktrees/feature/new-thing
     Review:     ~/git/rgnets/rxg.worktrees/feature/new-thing/CODE_REVIEW.md
     Confidence: High

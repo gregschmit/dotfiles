@@ -73,6 +73,8 @@ Apply the §3 answers under the rules in `triage-issue` §6. Post each comment w
 
 ## End: report the table
 
-One row per issue: number (link to the issue if available), title, verdict, priority, difficulty, posted or held, and the one-line why. Put `ready` first, then `needs-info`, then the rest. Within each group, **sort by priority descending (Critical to Low), then by difficulty ascending (Trivial to High)**, so the most important quick wins sit at the top.
+One row per issue: number (link to the issue if available), title, author, assignee, verdict, priority, difficulty, PRs/MRs, posted or held, and the one-line why. Put `ready` first, then `needs-info`, then the rest. Within each group, **sort by priority descending (Critical to Low), then by difficulty ascending (Trivial to High)**, so the most important quick wins sit at the top.
+
+Show people by username only. PRs/MRs is the signal that someone is working on the issue: each linked PR/MR with its state, such as `#12 open, #9 merged`, or `—` for none. Assignees and PRs/MRs change, so read them now for every row, not from the triage comment. Do it in one script that prints only these columns, with the calls in `triage-issue` §3. On GitHub, put every issue in one GraphQL query, with an alias per issue.
 
 Keep the already-triaged issues in the table, so the batch accounts for everything the mode resolved to. List any overlaps under the table. Then ask once whether to clean up the worktree with `git worktree remove <path>`.

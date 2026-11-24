@@ -9,7 +9,7 @@ Follow `git-forge` for `gh` vs `glab` and the glab `--repo` rule. Triage reads c
 
 ## 1. Read the issue
 
-Get the title, body, labels, state, and every comment. Follow links to related issues and PRs/MRs.
+Get the title, body, author, assignees, labels, state, and every comment. Follow links to related issues and PRs/MRs.
 
 ## 2. Get the code
 
@@ -20,6 +20,16 @@ Judge the issue against primary as it is now. Run `git fetch origin`. If this ch
 - **What is asked.** Say the problem or request in your own words.
 - **Is it real.** Find the code involved. For a bug, trace whether it can happen. For a feature, check whether it exists already.
 - **Is it covered.** Search open and closed issues and open PRs/MRs, with a few keywords.
+- **Is it in progress.** List the PRs/MRs linked to the issue, with their state (open, draft, merged, closed). An open one means someone is on it. Keep only PRs/MRs in this repo.
+  - **GitHub** — the issue's timeline holds manual links (`ConnectedEvent`) and mentions, closing keywords included (`CrossReferencedEvent`):
+    ```
+    gh api graphql -F o=<owner> -F r=<repo> -F n=<number> -f query='
+      query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){
+        timelineItems(itemTypes:[CONNECTED_EVENT,CROSS_REFERENCED_EVENT],first:100){nodes{
+          ... on ConnectedEvent{subject{... on PullRequest{number state isDraft url}}}
+          ... on CrossReferencedEvent{source{... on PullRequest{number state isDraft url}}}}}}}}'
+    ```
+  - **GitLab** — `glab api "projects/<id>/issues/<iid>/related_merge_requests"` gives the MRs that mention or close the issue, with `state` and `draft`.
 - **What it takes.** Note the code to change and the riskiest part.
 
 ## 4. Rate it
@@ -55,6 +65,8 @@ Print the triage in this shape. A human reads the top first, so write it for a t
 | Verdict   | Priority              | Difficulty   | Why               |
 | :-------- | :-------------------- | :----------- | :---------------- |
 | [verdict] | [priority] ([source]) | [difficulty] | [one-line reason] |
+
+**Author:** [username] · **Assignee:** [usernames, or "none"] · **PRs/MRs:** [each linked PR/MR with its state, or "none"]
 
 <details>
 

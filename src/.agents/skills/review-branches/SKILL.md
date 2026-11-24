@@ -16,7 +16,7 @@ Scan the 200 most recent open PRs/MRs, unless the user asks for more or a specif
 - **GitHub** — `gh search prs -R <owner>/<repo> --state open --match comments '"Code Review"' --json number`, then fetch the comments of those PRs only.
 - **GitLab** — `glab api "projects/<id>/search?scope=notes&search=Code%20Review&per_page=100"`, paged, where `<id>` may be the URL-encoded path (`rgnets%2Frxg`). It returns the comments themselves, from issues and MRs alike.
 
-Do the rest in one script, so only its output reaches your context. Search matching is loose, so keep only comments on open PRs/MRs that open with the `🤖 **Agent` header and hold a `Code Review:` summary line. Take the newest per target, and print one row each: number, title, branch, and base; confidence, difficulty, findings, and why from the review's summary table; and the commit and date from its summary line. Add a row for each `CODE_REVIEW.md` in a worktree from `git worktree list` whose branch has no open PR/MR.
+Do the rest in one script, so only its output reaches your context. Search matching is loose, so keep only comments on open PRs/MRs that open with the `🤖 **Agent` header and hold a `Code Review:` summary line. Take the newest per target, and print one row each: number, title, author, branch, and base; confidence, difficulty, findings, and why from the review's summary table; and the commit and date from its summary line. Add a row for each `CODE_REVIEW.md` in a worktree from `git worktree list` whose branch has no open PR/MR.
 
 Run `git fetch origin` once, then mark each review current or stale with the `review-branch` §3 check, as §2 does.
 
@@ -65,10 +65,10 @@ Launch the agents in a single message so they run concurrently. Cap it around te
 - Work only inside your own worktree. The path is keyed on the branch, so no two agents share one. Never touch another worktree or the main clone.
 - `git worktree add` serializes on the main clone's lock. Retry once on a lock error.
 - If this is a branch labeled `llm::pipeline-complete`, then if there are any blocking findings, the label should be removed and a new label `llm::ready-to-implement` should be added.
-- Return: the target, worktree path, review file path, verdict, the review's whole summary row (confidence, difficulty, blocking/should-fix/nit counts, and the one-line why), and what you posted or skipped.
+- Return: the target, its author, worktree path, review file path, verdict, the review's whole summary row (confidence, difficulty, blocking/should-fix/nit counts, and the one-line why), and what you posted or skipped.
 
 ## End: report the table
 
-One row per target — number or branch (link to the PR/MR if available), title, confidence, difficulty, findings as `B/S/N`, posted or held, worktree path. **Sort by confidence descending (High, Medium, Low), then by difficulty ascending (Trivial, Low, Medium, High)**, so the safest merges sit at the top, quickest first, and the ones needing real work sit at the bottom. Carry each agent's one-line why; trim it to a few words if the table gets wide.
+One row per target — number or branch (link to the PR/MR if available), title, author (username only, `—` with no PR/MR), confidence, difficulty, findings as `B/S/N`, posted or held, worktree path. **Sort by confidence descending (High, Medium, Low), then by difficulty ascending (Trivial, Low, Medium, High)**, so the safest merges sit at the top, quickest first, and the ones needing real work sit at the bottom. Carry each agent's one-line why; trim it to a few words if the table gets wide.
 
 Keep the dropped ones in the table so the batch accounts for everything the mode resolved to. Then ask once whether to clean up the worktrees with `git worktree remove <path>`.
