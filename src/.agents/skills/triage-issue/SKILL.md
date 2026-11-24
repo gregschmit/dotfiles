@@ -81,12 +81,8 @@ Print the triage in this shape. A human reads the top first, so write it for a t
 
 Keep the table and the `Agent Triage:` line in exactly this shape: `triage-issues` finds triages by that line and reads the table row with a script.
 
-## 6. Post — confirm first
+## 6. Post
 
-Show the user the comment and ask before posting it. Post it as an issue comment, with the attribution header from AGENTS.md and the operation `triage-issue`.
+Show the review to the user and post it as an issue comment.
 
 Never close, edit, or assign the issue: flag a duplicate and let a human close it. Add a label only if the user names it, and that includes `llm::` labels, which start automated pipelines on some projects.
-
-## End: report the worktree
-
-If you made a worktree, print its path.

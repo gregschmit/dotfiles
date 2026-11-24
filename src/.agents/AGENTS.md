@@ -23,10 +23,10 @@
 ## Worktrees
 
 Agent worktrees live under `<project>.worktrees/<branch>`, beside the main checkout, so `~/git/rgnets/rxg` keeps them in `~/git/rgnets/rxg.worktrees`. Find `<project>` with `dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`, because `--show-toplevel` gives the worktree when you are inside one. `<branch>` may itself contain slashes:
-- Only create a worktree if your skill or task demands one. Skills that use them print the worktree path when they finish.
+- Only create a worktree if your skill or task demands one.
 - If you're already in a worktree and it matches what the user asked for, stay there; otherwise create a new one per the convention below.
 - If the worktree path already exists, reuse it. Recreate it only when the user asks.
-- Worktrees persist across runs so their outputs (edits, `CODE_REVIEW.md`) remain reachable. When you're done, ask the user if you should clean up the worktree with `git worktree remove <path>`.
+- When you finish, remove the worktree (even if you didn't create it) unless the user asks to keep it or another agent still needs it (`cd` back to the main checkout first). The branch stays.
 - New branch in a worktree: `git fetch origin`, then `git worktree add -b <branch> <path> origin/<primary>`.
 - Existing branch in a worktree: `git fetch origin`, `git worktree add <path> origin/<primary>`, `cd` in, `git pull`, then attach the target — `gh pr checkout N` / `glab mr checkout N --repo …` for PR/MR mode, or `git checkout <branch> && git pull` for a local branch.
 - New branches use `<$USER>/<short-kebab-slug>` — short and human-readable, e.g. `gns/fix-portal-devices-ui`. Always branch from primary unless told otherwise. Do not encode the issue number in the branch name.

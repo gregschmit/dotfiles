@@ -77,4 +77,4 @@ One row per issue: number (link to the issue if available), title, author, assig
 
 Show people by username only. PRs/MRs is the signal that someone is working on the issue: each linked PR/MR with its state, such as `#12 open, #9 merged`, or `—` for none. Assignees and PRs/MRs change, so read them now for every row, not from the triage comment. Do it in one script that prints only these columns, with the calls in `triage-issue` §3. On GitHub, put every issue in one GraphQL query, with an alias per issue.
 
-Keep the already-triaged issues in the table, so the batch accounts for everything the mode resolved to. List any overlaps under the table. Then ask once whether to clean up the worktree with `git worktree remove <path>`.
+Keep the already-triaged issues in the table, so the batch accounts for everything the mode resolved to. List any overlaps under the table. Then remove the worktree.

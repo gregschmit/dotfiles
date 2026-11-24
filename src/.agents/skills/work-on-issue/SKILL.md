@@ -29,21 +29,24 @@ Create a new branch inside a worktree. `cd` into the worktree. All remaining ste
 
 Invoke `develop`, with a bakeoff if §3 chose one, and a task written from §3: the issue number, what done means, and what is out of scope. If it ends in anything but approval, show the user the open or refused findings and ask how to proceed.
 
-## 6. Commit — confirm first
+## 6. Commit
 
-Draft the commit message and share it with the user before running `git commit`. Start from the last review's suggested message. Reference the issue on a final separate line (e.g., `Closes #N`) so the forge links commit ↔ issue. Leave `CODE_REVIEW.md` out of the commit.
+Commit the change without asking: the request to work on the issue covers commits and pushes on its branch. Start the message from the last review's suggested message. Reference the issue on a final separate line (e.g., `Closes #N`) so the forge links commit ↔ issue.
 
-## 7. Push — confirm first
+## 7. Push
 
-Confirm with the user before `git push -u origin <branch>`.
+Run `git push -u origin <branch>`. If you can tell that you lack the rights to push, e.g. `origin` is an `https` URL, do not push: skip §8.
 
-## 8. Open a PR/MR — only if requested
+## 8. Open a PR/MR
 
-The branch may stand on its own — do not assume a PR/MR is wanted. If the user asks for one, draft title and body, share with the user, then open. Body should link the issue (`Closes #N` works on both forges). Open as draft unless told otherwise. Follow any repo CI or template conventions.
+Open one by default. Leave it out only when the user says so, or when the branch was not pushed. Draft title and body, share with the user, then open. Body should link the issue (`Closes #N` works on both forges). Open as draft unless told otherwise. Follow any repo CI or template conventions.
 
-## End: report the worktree
+## End: clean up and report
 
-Print the worktree path and how `develop` ended, e.g.
+Remove the worktree, as AGENTS.md says. Print the branch, the PR/MR (or why there is none), and how `develop` ended, e.g.
 
-    Worktree: ~/git/dotfiles.worktrees/gns/fix-portal-devices-ui
-    Outcome:  approved after 2 reviews
+    Branch:  gns/fix-portal-devices-ui
+    PR/MR:   https://github.com/owner/repo/pull/12
+    Outcome: approved after 2 reviews
+
+If the worktree stays, add a `Worktree:` line with its path and the reason.

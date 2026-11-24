@@ -39,7 +39,7 @@ Several contenders each build the change, with their own rounds. The best build,
 You are the developer, and the reviewers come from the rule above. If the working tree is dirty when you start, and no bakeoff ran, ask whether those changes belong to the task.
 
 1. **Build.** Follow repo conventions (`AGENTS.md`, neighboring code). Add tests for new behavior and run what you can. Ask the user before scope expansions the task does not describe.
-2. **Review.** Run every reviewer fresh each round, all at once, so none inherits the developer's reasoning. Prompt each with the task, the findings refused so far with their reasons, and "Invoke the `code-review` skill in `changes` mode. Print the review as your final message. Do not change code, and write no files, not even `CODE_REVIEW.md`." The reviewers share the working tree, so a file one writes would clash with the others and land in the change. Take each review from its CLI's output.
+2. **Review.** Run every reviewer fresh each round, all at once, so none inherits the developer's reasoning. Prompt each with the task, the findings refused so far with their reasons, and "Invoke the `code-review` skill in `changes` mode. Print the review as your final message. Do not change code, and write no files." The reviewers share the working tree, so a file one writes would land in the change. Take each review from its CLI's output.
 3. **Respond.** Fix or refuse each Blocking and Should-fix finding from any review; a finding that two reviews share counts once. Refuse only when you can say why the finding is wrong or out of scope. Nits are optional and never hold the rounds open.
 4. **Repeat** from step 2, until one of these ends the rounds:
    - **Approved** — no review has Blocking or Should-fix findings.
@@ -48,13 +48,12 @@ You are the developer, and the reviewers come from the rule above. If the workin
 
 ## End: report
 
-Save the last round's reviews to `./CODE_REVIEW.md`, each under a heading that names its reviewer. Then print how the Rounds ended, the review file, and anything the user must judge, e.g.
+Print how the Rounds ended and anything the user must judge, e.g.
 
     Outcome: approved after 2 rounds by claude and codex
-    Review:  ~/git/rgnets/rxg.worktrees/gns/new-thing/CODE_REVIEW.md
     Refused: [K7R2] out of scope: the task excludes the old API
     Checks:  bin/rails test (passed)
 
-After a bakeoff, also report each track (contender, reviewers, how its rounds ended), the pick and why, and what you took from the others. Ask once whether to remove the bakeoff worktrees.
+Save the last round's reviews to a file only when the user asks for one, each under a heading that names its reviewer. If they give no path, use `./CODE_REVIEW.md`. The file is not part of the change. Never commit it.
 
-`CODE_REVIEW.md` is not part of the change. Never commit it.
+After a bakeoff, also report each track (contender, reviewers, how its rounds ended), the pick and why, and what you took from the others. Then remove the bakeoff worktrees with `git worktree remove --force <path>`, because their builds are uncommitted.

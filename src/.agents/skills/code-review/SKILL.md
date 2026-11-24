@@ -13,7 +13,7 @@ Perform a comprehensive technical review of code changes in this git repository,
 Parse `$1` as the mode; remaining tokens in `$ARGUMENTS` are an optional focus hint.
 
 - `branch` / empty / unrecognized → diff the current branch against its base from their merge base (`git diff <base>...HEAD`): the branch the caller names, or else the repo's primary branch. If already on the base and the focus hint doesn't explain what to look at, then stop - nothing to review.
-- `changes` → all working-tree changes vs. `HEAD`, untracked files included. Skip `./CODE_REVIEW.md`, this skill's own output.
+- `changes` → all working-tree changes vs. `HEAD`, untracked files included. Skip `./CODE_REVIEW.md` if it exists: it is a saved review, not part of the change.
 
 If `$1` is unrecognized, treat all of `$ARGUMENTS` as the focus hint. If the diff is empty, say so and stop.
 
@@ -34,7 +34,7 @@ Always draft a commit message alongside the review, following the repo's commit 
 
 ## Output
 
-Print the output in this shape, and also save it to `./CODE_REVIEW.md`. The `<details>` blocks keep a copy-paste into a PR/MR comment tidy.
+Print the output in this shape. The `<details>` blocks keep a copy-paste into a PR/MR comment tidy. Write no file unless the user asks for one; if they give no path, use `./CODE_REVIEW.md`.
 
 ```
 [verdict emoji] [verdict phrase]
