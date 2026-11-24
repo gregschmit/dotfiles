@@ -16,7 +16,7 @@
   "effortLevel": "xhigh",
   "modelSettings": {
     "claude-opus-5-5": {
-      "effortLevel": "xhigh"
+      "effortLevel": "high"
     },
     "claude-fable-5-1": {
       "effortLevel": "xhigh"
@@ -28,6 +28,6 @@
   "tui": "fullscreen",
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
-  "agentPushNotifEnabled": true,
-  "switchModelsOnFlag": false
+  "switchModelsOnFlag": false,
+  "agentPushNotifEnabled": true
 }

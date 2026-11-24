@@ -1,11 +1,26 @@
 ---
 name: review-branches
-description: Use when asked to review several branches, PRs, or MRs.
+description: Use when asked to review several branches, PRs, or MRs, or to show existing reviews.
 ---
 
 # Review a batch of branches
 
 A batch wrapper around `review-branch`. Follow `git-forge` for CLI choice and the glab `--repo` rule.
+
+## Report only
+
+If the user says `report`, or asks only to see existing reviews, follow this section and skip §1 to §4. It reviews nothing, starts no agents, changes no branch, posts nothing, and needs no worktree.
+
+Scan the 200 most recent open PRs/MRs, unless the user asks for more or a specific set of targets, by a §1 mode or a list. Find their reviews with one search, not by reading threads:
+
+- **GitHub** — `gh search prs -R <owner>/<repo> --state open --match comments '"Code Review"' --json number`, then fetch the comments of those PRs only.
+- **GitLab** — `glab api "projects/<id>/search?scope=notes&search=Code%20Review&per_page=100"`, paged, where `<id>` may be the URL-encoded path (`rgnets%2Frxg`). It returns the comments themselves, from issues and MRs alike.
+
+Do the rest in one script, so only its output reaches your context. Search matching is loose, so keep only comments on open PRs/MRs that open with the `🤖 **Agent` header and hold a `Code Review:` summary line. Take the newest per target, and print one row each: number, title, branch, and base; confidence, difficulty, findings, and why from the review's summary table; and the commit and date from its summary line. Add a row for each `CODE_REVIEW.md` in a worktree from `git worktree list` whose branch has no open PR/MR.
+
+Run `git fetch origin` once, then mark each review current or stale with the `review-branch` §3 check, as §2 does.
+
+Print the table from End, sorted the same way, with the review's date and current or stale in place of posted or held. Give a worktree path only for reviews read from a worktree. Under the table, say how many targets you scanned, how many had a review, and whether the limit left any out.
 
 ## 1. Resolve the input — five modes
 
