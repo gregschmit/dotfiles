@@ -16,7 +16,7 @@ Scan the 200 most recent open PRs/MRs, unless the user asks for more or a specif
 - **GitHub** — `gh search prs -R <owner>/<repo> --state open --match comments '"Code Review"' --json number`, then fetch the comments of those PRs only.
 - **GitLab** — `glab api "projects/<id>/search?scope=notes&search=Code%20Review&per_page=100"`, paged, where `<id>` may be the URL-encoded path (`rgnets%2Frxg`). It returns the comments themselves, from issues and MRs alike.
 
-Do the rest in one script, so only its output reaches your context. Search matching is loose, so keep only comments on open PRs/MRs that open with the `🤖 **Agent` header and hold a `Code Review:` summary line. Take the newest per target, and print one row each: number, title, author, branch, and base; confidence, difficulty, findings, and why from the review's summary table; and the commit and date from its summary line.
+Do the rest in one script, so only its output reaches your context. Search matching is loose, so keep only comments on open PRs/MRs that open with the `🤖 **Agent` header and hold a `Code Review:` summary line. Take the newest per target, and print one row each: number and PR/MR URL, title, author, branch, and base; confidence, difficulty, findings, and why from the review's summary table; and the commit and date from its summary line.
 
 Run `git fetch origin` once, then mark each review current or stale with the `review-branch` §3 check, as §2 does.
 
@@ -69,6 +69,6 @@ Launch the agents in a single message so they run concurrently. Cap it around te
 
 ## End: report the table
 
-One row per target — number or branch (link to the PR/MR if available), title, author (username only, `—` with no PR/MR), confidence, difficulty, findings as `B/S/N`, posted or held. **Sort by confidence descending (High, Medium, Low), then by difficulty ascending (Trivial, Low, Medium, High)**, so the safest merges sit at the top, quickest first, and the ones needing real work sit at the bottom. Carry each agent's one-line why; trim it to a few words if the table gets wide.
+One row per target — number (including link to PR/MR) or branch, title (truncated with trailing `...`, if necessary), author (username only, `—` with no PR/MR), confidence, difficulty, findings as `B/S/N`, posted or held. **Sort by confidence descending (High, Medium, Low), then by difficulty ascending (Trivial, Low, Medium, High)**, so the safest merges sit at the top, quickest first, and the ones needing real work sit at the bottom. Carry each agent's one-line why; trim it to a few words if the table gets wide.
 
 Keep the dropped ones in the table so the batch accounts for everything the mode resolved to. Under the table, print each held review in full. Then remove the worktree.
