@@ -25,6 +25,8 @@ Cover where applicable: correctness (logic, error handling, nil paths, concurren
 
 If a focus hint was supplied, weight that area heavily but still pass over the rest.
 
+If there is an associated issue, scrutinize whether the changes fully address the issue's requirements and whether they do so in a reasonable way. Check if this is a simple, minimal, and complete solution. Don't be afraid to scrutinize the issue too if it seems ambiguous, unreasonable, based on a misunderstanding of the codebase, or in bad taste. For example, an issue could ask for a button to be placed to do something, but the underlying issue could be resolved in a more elegant way that doesn't require adding a button.
+
 ## Commit Message
 
 Always draft a commit message alongside the review, following the repo's commit conventions (terse, 50/72; body a short paragraph on the _why_).

@@ -19,6 +19,7 @@ Judge the issue against primary as it is now. Run `git fetch origin`. If this ch
 
 - **What is asked.** Say the problem or request in your own words.
 - **Is it real.** Find the code involved. For a bug, trace whether it can happen. For a feature, check whether it exists already.
+- **Is it reasonable.** Check whether the request is a good fit for the codebase and whether a simpler or more appropriate solution exists. Use prudent judgement to ensure we are not accepting requests that are ambiguous, unreasonable, based on a misunderstanding of the codebase, or in bad taste.
 - **Is it covered.** Search open and closed issues and open PRs/MRs, with a few keywords.
 - **Is it in progress.** List the PRs/MRs linked to the issue, with their state (open, draft, merged, closed). An open one means someone is on it. Keep only PRs/MRs in this repo.
   - **GitHub** — the issue's timeline holds manual links (`ConnectedEvent`) and mentions, closing keywords included (`CrossReferencedEvent`):
