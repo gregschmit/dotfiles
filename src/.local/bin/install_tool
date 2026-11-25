@@ -13,7 +13,6 @@ usage() {
 }
 
 install_antigravity() {
-  # Installs the `agy` binary into `~/.local/bin`.
   curl -fsSL https://antigravity.google/cli/install.sh | bash
 }
 
